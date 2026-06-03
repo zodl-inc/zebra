@@ -22,7 +22,7 @@ volume so the chain state survives container restarts.
 You can also use `docker compose`, which we recommend. First get the repo:
 
 ```shell
-git clone --depth 1 https://github.com/ZcashFoundation/zebra.git
+git clone --depth 1 https://github.com/zodl-inc/zebra.git
 cd zebra
 ```
 
@@ -51,7 +51,7 @@ docker build \
 
 ### Alternatives
 
-See [Building Zebra](https://github.com/ZcashFoundation/zebra#manual-build) for more information.
+See [Building Zebra](https://github.com/zodl-inc/zebra#manual-build) for more information.
 
 ### Building with Custom Features
 

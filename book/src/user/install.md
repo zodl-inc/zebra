@@ -10,7 +10,7 @@ If you want to build Zebra, install the build dependencies as described in the
 get the source code from GitHub:
 
 ```bash
-git clone https://github.com/ZcashFoundation/zebra.git
+git clone https://github.com/zodl-inc/zebra.git
 cd zebra
 ```
 

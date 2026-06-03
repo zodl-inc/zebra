@@ -8,7 +8,7 @@ The Zcash blockchain community consistently explores upgrades to the Zcash proto
 
 As of writing, the current network upgrade on the Zcash Testnet is `Nu5`. While a future upgrade (`Nu6`) activation height will be known later, for this tutorial, we aim to activate after `Nu5`, allowing us to observe our code crossing the network upgrade and continuing isolated.
 
-To achieve this, we'll use [Zebra](https://github.com/ZcashFoundation/zebra) as the node, [s-nomp](https://github.com/ZcashFoundation/s-nomp) as the mining pool, and [nheqminer](https://github.com/ZcashFoundation/nheqminer) as the Equihash miner.
+To achieve this, we'll use [Zebra](https://github.com/zodl-inc/zebra) as the node, [s-nomp](https://github.com/ZcashFoundation/s-nomp) as the mining pool, and [nheqminer](https://github.com/ZcashFoundation/nheqminer) as the Equihash miner.
 
 **Note:** This tutorial aims to remain generally valid after `Nu6`, with adjustments to the network upgrade name and block heights.
 

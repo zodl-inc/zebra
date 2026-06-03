@@ -2,12 +2,12 @@
 
 ---
 
-[![Unit Tests](https://github.com/ZcashFoundation/zebra/actions/workflows/tests-unit.yml/badge.svg)](https://github.com/ZcashFoundation/zebra/actions/workflows/tests-unit.yml)
-[![Lint](https://github.com/ZcashFoundation/zebra/actions/workflows/lint.yml/badge.svg)](https://github.com/ZcashFoundation/zebra/actions/workflows/lint.yml)
-[![Integration Tests (GCP)](https://github.com/ZcashFoundation/zebra/actions/workflows/zfnd-ci-integration-tests-gcp.yml/badge.svg)](https://github.com/ZcashFoundation/zebra/actions/workflows/zfnd-ci-integration-tests-gcp.yml)
-[![codecov](https://codecov.io/gh/ZcashFoundation/zebra/branch/main/graph/badge.svg)](https://codecov.io/gh/ZcashFoundation/zebra)
-[![Build docs](https://github.com/ZcashFoundation/zebra/actions/workflows/book.yml/badge.svg)](https://github.com/ZcashFoundation/zebra/actions/workflows/book.yml)
-[![Deploy Nodes (GCP)](https://github.com/ZcashFoundation/zebra/actions/workflows/zfnd-deploy-nodes-gcp.yml/badge.svg)](https://github.com/ZcashFoundation/zebra/actions/workflows/zfnd-deploy-nodes-gcp.yml)
+[![Unit Tests](https://github.com/zodl-inc/zebra/actions/workflows/tests-unit.yml/badge.svg)](https://github.com/zodl-inc/zebra/actions/workflows/tests-unit.yml)
+[![Lint](https://github.com/zodl-inc/zebra/actions/workflows/lint.yml/badge.svg)](https://github.com/zodl-inc/zebra/actions/workflows/lint.yml)
+[![Integration Tests (GCP)](https://github.com/zodl-inc/zebra/actions/workflows/zfnd-ci-integration-tests-gcp.yml/badge.svg)](https://github.com/zodl-inc/zebra/actions/workflows/zfnd-ci-integration-tests-gcp.yml)
+[![codecov](https://codecov.io/gh/zodl-inc/zebra/branch/main/graph/badge.svg)](https://codecov.io/gh/zodl-inc/zebra)
+[![Build docs](https://github.com/zodl-inc/zebra/actions/workflows/book.yml/badge.svg)](https://github.com/zodl-inc/zebra/actions/workflows/book.yml)
+[![Deploy Nodes (GCP)](https://github.com/zodl-inc/zebra/actions/workflows/zfnd-deploy-nodes-gcp.yml/badge.svg)](https://github.com/zodl-inc/zebra/actions/workflows/zfnd-deploy-nodes-gcp.yml)
 ![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)
 
 - [Getting Started](#getting-started)
@@ -97,7 +97,7 @@ cargo install --locked zebrad
 Alternatively, you can install it from GitHub:
 
 ```sh
-cargo install --git https://github.com/ZcashFoundation/zebra --tag v4.5.3 zebrad
+cargo install --git https://github.com/zodl-inc/zebra --tag v4.5.3 zebrad
 ```
 
 You can start Zebra by running
@@ -148,7 +148,7 @@ The Zcash Foundation maintains the following resources documenting Zebra:
 ## User support
 
 If Zebra doesn't behave the way you expected, [open an
-issue](https://github.com/ZcashFoundation/zebra/issues/new/choose). We regularly
+issue](https://github.com/zodl-inc/zebra/issues/new/choose). We regularly
 triage new issues and we will respond. We maintain a list of known issues in the
 [Troubleshooting](https://zebra.zfnd.org/user/troubleshooting.html) section of
 the book.
@@ -160,7 +160,7 @@ channel.
 ## Security
 
 Zebra has a [responsible disclosure
-policy](https://github.com/ZcashFoundation/zebra/blob/main/SECURITY.md), which
+policy](https://github.com/zodl-inc/zebra/blob/main/SECURITY.md), which
 we encourage security researchers to follow.
 
 ## License

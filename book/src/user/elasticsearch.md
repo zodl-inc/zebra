@@ -49,7 +49,7 @@ You are now ready to start bumping data into elasticsearch with Zebra.
 Elasticsearch is an optional and experimental feature, we need to build and install with the `elasticsearch` rust feature enabled using the following command:
 
 ```sh
-cargo install --features elasticsearch --locked --git https://github.com/ZcashFoundation/zebra zebrad
+cargo install --features elasticsearch --locked --git https://github.com/zodl-inc/zebra zebrad
 ```
 
 Zebra binary will be at `~/.cargo/bin/zebrad`.

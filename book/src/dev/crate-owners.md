@@ -111,7 +111,7 @@ $ cargo owner --remove dconnolly
 To change owners of current Zebra crates:
 
 ```sh
-$ git clone https://github.com/ZcashFoundation/zebra
+$ git clone https://github.com/zodl-inc/zebra
 $ cd zebra
 $ for crate in tower-* zebra*; do pushd $crate; cargo owner --add oxarbitrage; cargo owner --remove dconnolly; popd; done
 ~/zebra/tower-batch-control ~/zebra

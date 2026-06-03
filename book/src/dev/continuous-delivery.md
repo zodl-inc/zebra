@@ -38,4 +38,4 @@ The workflow runs on:
 
 Pull requests run only the Docker-configuration tests; they do not deploy.
 
-For implementation details, see the [deploy workflow](https://github.com/ZcashFoundation/zebra/blob/main/.github/workflows/zfnd-deploy-nodes-gcp.yml).
+For implementation details, see the [deploy workflow](https://github.com/zodl-inc/zebra/blob/main/.github/workflows/zfnd-deploy-nodes-gcp.yml).

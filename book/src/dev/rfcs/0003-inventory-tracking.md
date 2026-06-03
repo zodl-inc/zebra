@@ -27,7 +27,7 @@ that they have it.
 
 - Inventory item: either a block or transaction.
 - Inventory hash: the hash of an inventory item, represented by the
-  [`InventoryHash`](https://github.com/ZcashFoundation/zebra/blob/main/zebra-network/src/protocol/external/inv.rs)
+  [`InventoryHash`](https://github.com/zodl-inc/zebra/blob/main/zebra-network/src/protocol/external/inv.rs)
   type.
 - Inventory advertisement: a notification from another peer that they have some inventory item.
 - Inventory request: a request to another peer for an inventory item.

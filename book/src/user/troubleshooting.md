@@ -87,7 +87,7 @@ filter = 'info,zebra_network=debug'
 ```
 
 If you keep on seeing multiple info logs per second, please
-[open a bug.](https://github.com/ZcashFoundation/zebra/issues/new/choose)
+[open a bug.](https://github.com/zodl-inc/zebra/issues/new/choose)
 
 ### Linux TCP tuning for block propagation
 

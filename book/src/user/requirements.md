@@ -63,4 +63,4 @@ networks.
 
 Zebra needs some peers which have a round-trip latency of 2 seconds or less. If
 this is a problem for you, please [open a
-ticket.](https://github.com/ZcashFoundation/zebra/issues/new/choose)
+ticket.](https://github.com/zodl-inc/zebra/issues/new/choose)

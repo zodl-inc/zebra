@@ -9,7 +9,7 @@ front end that you can visualize:
 1. Build zebra with `prometheus` feature:
 
    ```bash
-   cargo install --features prometheus --locked --git https://github.com/ZcashFoundation/zebra zebrad
+   cargo install --features prometheus --locked --git https://github.com/zodl-inc/zebra zebrad
    ```
 
 2. Create a `zebrad.toml` file that we can edit:

@@ -7,11 +7,11 @@ Zebra has extensive continuous integration tests for node syncing and `lightwall
 ## Workflow Reference
 
 For a comprehensive overview of all CI/CD workflows including architecture diagrams,
-see the [CI/CD Architecture documentation](https://github.com/ZcashFoundation/zebra/blob/main/.github/workflows/README.md).
+see the [CI/CD Architecture documentation](https://github.com/zodl-inc/zebra/blob/main/.github/workflows/README.md).
 
 ## Integration Tests
 
-On every PR change, Zebra runs [these Docker tests](https://github.com/ZcashFoundation/zebra/blob/main/.github/workflows/zfnd-ci-integration-tests-gcp.yml):
+On every PR change, Zebra runs [these Docker tests](https://github.com/zodl-inc/zebra/blob/main/.github/workflows/zfnd-ci-integration-tests-gcp.yml):
 
 - Zebra update syncs from a cached state Google Cloud tip image
 - lightwalletd full syncs from a cached state Google Cloud tip image
@@ -30,7 +30,7 @@ which are shared by all tests. Tests prefer the latest image generated from the 
 But if a state from the same commit is not available, tests will use the latest image from
 any branch and commit, as long as the state version is the same.
 
-Zebra also does [a smaller set of tests](https://github.com/ZcashFoundation/zebra/blob/main/.github/workflows/tests-unit.yml) on tier 2 platforms using GitHub actions runners.
+Zebra also does [a smaller set of tests](https://github.com/zodl-inc/zebra/blob/main/.github/workflows/tests-unit.yml) on tier 2 platforms using GitHub actions runners.
 
 ## Automated Merges
 
@@ -67,7 +67,7 @@ But the following jobs don't need branch protection rules:
   We have branch protection rules for build jobs, but we could remove them if we want.
 
 When a new job is added in a PR, use the `#devops` Slack channel to ask a GitHub admin to add a branch protection rule after it merges.
-Adding a new Zebra crate automatically adds a new job to build that crate by itself in [test-crates.yml](https://github.com/ZcashFoundation/zebra/blob/main/.github/workflows/test-crates.yml),
+Adding a new Zebra crate automatically adds a new job to build that crate by itself in [test-crates.yml](https://github.com/zodl-inc/zebra/blob/main/.github/workflows/test-crates.yml),
 so new crate PRs also need to add a branch protection rule.
 
 #### Admin: Changing Branch Protection Rules
@@ -87,7 +87,7 @@ Any developer:
 
 Admin:
 
-1. Go to the [branch protection rule settings](https://github.com/ZcashFoundation/zebra/settings/branches)
+1. Go to the [branch protection rule settings](https://github.com/zodl-inc/zebra/settings/branches)
 2. Click on `Edit` for the `main` branch
 3. Scroll down to the `Require status checks to pass before merging` section.
    (This section must always be enabled. If it is disabled, all the rules get deleted.)
@@ -145,7 +145,7 @@ Please shut down large instances when they are not being used.
 
 ### Automated Deletion
 
-The [Delete GCP Resources](https://github.com/ZcashFoundation/zebra/blob/main/.github/workflows/zfnd-delete-gcp-resources.yml)
+The [Delete GCP Resources](https://github.com/zodl-inc/zebra/blob/main/.github/workflows/zfnd-delete-gcp-resources.yml)
 workflow automatically deletes test instances, instance templates, disks, and images older than a few days.
 
 If you want to keep instances, instance templates, disks, or images in Google Cloud, name them so they don't match the automated names:
@@ -207,7 +207,7 @@ CI sync jobs near the tip will take different amounts of time as:
 To fix a CI sync timeout, follow these steps until the timeouts are fixed:
 
 1. Check for recent PRs that could have caused a performance decrease
-2. [Update Zebra's checkpoints](https://github.com/ZcashFoundation/zebra/blob/main/zebra-utils/README.md#zebra-checkpoints)
+2. [Update Zebra's checkpoints](https://github.com/zodl-inc/zebra/blob/main/zebra-utils/README.md#zebra-checkpoints)
 3. If a Rust test fails with "command did not log any matches for the given regex, within the ... timeout":
 
    a. If it's the full sync test, [increase the full sync timeout](https://github.com/ZcashFoundation/zebra/pull/5129/files)
@@ -236,7 +236,7 @@ To fix duplicate dependencies, follow these steps until the duplicate dependenci
 
    b. Try adding `default-features = false` to Zebra's dependencies (see [PR #4082](https://github.com/ZcashFoundation/zebra/pull/4082/files)).
 
-3. If there are still duplicate dependencies, add or update `skip-tree` in [`deny.toml`](https://github.com/ZcashFoundation/zebra/blob/main/deny.toml):
+3. If there are still duplicate dependencies, add or update `skip-tree` in [`deny.toml`](https://github.com/zodl-inc/zebra/blob/main/deny.toml):
 
    a. Prefer exceptions for dependencies that are closer to Zebra in the dependency tree (sometimes this resolves other duplicates as well),
 
@@ -258,8 +258,8 @@ To fix duplicate dependencies, follow these steps until the duplicate dependenci
 
 If the Docker cached state disks are full, increase the disk sizes in:
 
-- [zfnd-deploy-integration-tests-gcp.yml](https://github.com/ZcashFoundation/zebra/blob/main/.github/workflows/zfnd-deploy-integration-tests-gcp.yml)
-- [zfnd-deploy-nodes-gcp.yml](https://github.com/ZcashFoundation/zebra/blob/main/.github/workflows/zfnd-deploy-nodes-gcp.yml)
+- [zfnd-deploy-integration-tests-gcp.yml](https://github.com/zodl-inc/zebra/blob/main/.github/workflows/zfnd-deploy-integration-tests-gcp.yml)
+- [zfnd-deploy-nodes-gcp.yml](https://github.com/zodl-inc/zebra/blob/main/.github/workflows/zfnd-deploy-nodes-gcp.yml)
 
 If the GitHub Actions disks are full, follow these steps until the errors are fixed:
 
