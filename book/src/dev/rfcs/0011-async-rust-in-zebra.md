@@ -15,7 +15,7 @@ with the [tokio](https://docs.rs/tokio/) executor.
 
 At a higher level, Zebra also uses [`tower::Service`s](https://docs.rs/tower/0.4.1/tower/trait.Service.html),
 [`tower::Buffer`s](https://docs.rs/tower/0.4.1/tower/buffer/struct.Buffer.html),
-and our own [`tower-batch-control`](https://github.com/ZcashFoundation/zebra/tree/main/tower-batch-control)
+and our own [`tower-batch-control`](https://github.com/zodl-inc/zebra/tree/main/tower-batch-control)
 implementation.
 
 # Motivation

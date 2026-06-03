@@ -39,7 +39,7 @@ A PR deploy creates one zonal MIG `zebrad-${branch}-${network}-${zone-letter}` i
 ### Run one
 
 ```bash
-gh workflow run zfnd-deploy-nodes-gcp.yml -R ZcashFoundation/zebra \
+gh workflow run zfnd-deploy-nodes-gcp.yml -R zodl-inc/zebra \
   --ref my-branch \
   -f network=Mainnet \
   -f zone=us-east1-b \
@@ -148,7 +148,7 @@ gcloud compute snapshots create "${DISK}-corrupted-${TS}" \
 gcloud compute disks delete "$DISK" --zone "$ZONE" --project $P --quiet
 
 # 3. Redeploy via workflow_dispatch for this single zone
-gh workflow run zfnd-deploy-nodes-gcp.yml -R ZcashFoundation/zebra \
+gh workflow run zfnd-deploy-nodes-gcp.yml -R zodl-inc/zebra \
   -f network=Mainnet -f zone="$ZONE" -f environment=dev \
   -f need_cached_disk=true -f cached_disk_type=tip
 ```
@@ -225,7 +225,7 @@ done
 # 4. Trigger workflow_dispatch for each (network, zone). The workflow sees
 #    the zonal disks exist and attaches them; no fresh bootstrap from cache.
 for Z in b c d; do
-  gh workflow run zfnd-deploy-nodes-gcp.yml -R ZcashFoundation/zebra \
+  gh workflow run zfnd-deploy-nodes-gcp.yml -R zodl-inc/zebra \
     -f network=Mainnet -f zone="us-east1-${Z}" \
     -f environment=$([ "$P" = "zfnd-prod-zebra" ] && echo prod || echo dev) \
     -f need_cached_disk=false

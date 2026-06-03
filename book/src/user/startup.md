@@ -1,6 +1,6 @@
 # Zebra Startup & Sync Process
 
-When Zebra starts up, it launches [a lot of concurrent tasks](https://github.com/ZcashFoundation/zebra/blob/main/zebrad/src/commands/start.rs).
+When Zebra starts up, it launches [a lot of concurrent tasks](https://github.com/zodl-inc/zebra/blob/main/zebrad/src/commands/start.rs).
 
 ## Grafana Dashboards
 

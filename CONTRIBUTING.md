@@ -15,14 +15,14 @@ how to build, run, and instrument Zebra.
 
 ## Bug Reports
 
-Please [create an issue](https://github.com/ZcashFoundation/zebra/issues/new?assignees=&labels=C-bug%2C+S-needs-triage&projects=&template=bug_report.yml&title=) on the Zebra issue tracker.
+Please [create an issue](https://github.com/zodl-inc/zebra/issues/new?assignees=&labels=C-bug%2C+S-needs-triage&projects=&template=bug_report.yml&title=) on the Zebra issue tracker.
 
 ## Pull Requests
 
 PRs are welcome, but every PR requires human review time. To make that time count:
 
-1. **Start with an issue.** Check the [issue tracker](https://github.com/ZcashFoundation/zebra/issues) for existing issues or create a new one describing what you want to change and why. **Wait for a team member to respond before writing code** — an issue with no team acknowledgment does not count as prior discussion.
-2. **Coordinate large changes.** For anything beyond a small bug fix, discuss your approach with us via [issue tracker](https://github.com/ZcashFoundation/zebra/issues) or [Discord](https://discord.gg/yVNhQwQE68) before opening a PR.
+1. **Start with an issue.** Check the [issue tracker](https://github.com/zodl-inc/zebra/issues) for existing issues or create a new one describing what you want to change and why. **Wait for a team member to respond before writing code** — an issue with no team acknowledgment does not count as prior discussion.
+2. **Coordinate large changes.** For anything beyond a small bug fix, discuss your approach with us via [issue tracker](https://github.com/zodl-inc/zebra/issues) or [Discord](https://discord.gg/yVNhQwQE68) before opening a PR.
 3. **Keep PRs focused.** One logical change per PR. If you're planning multiple related PRs, discuss the overall plan with the team first.
 4. **Follow conventional commits.** PRs are squash-merged to main, so the PR title becomes the commit message. Follow the [conventional commits](https://www.conventionalcommits.org/en/v1.0.0/#specification) standard.
 
@@ -30,8 +30,8 @@ Zebra is a validator node — it excludes features not strictly needed for block
 
 Check out the [help wanted][hw] or [good first issue][gfi] labels if you're looking for a place to get started.
 
-[hw]: https://github.com/ZcashFoundation/zebra/labels/E-help-wanted
-[gfi]: https://github.com/ZcashFoundation/zebra/labels/good%20first%20issue
+[hw]: https://github.com/zodl-inc/zebra/labels/E-help-wanted
+[gfi]: https://github.com/zodl-inc/zebra/labels/good%20first%20issue
 
 ## AI-Assisted Contributions
 

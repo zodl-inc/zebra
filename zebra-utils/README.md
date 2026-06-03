@@ -21,7 +21,7 @@ These checkpoints can be copied into the `main-checkpoints.txt` and `test-checkp
 
 To find the latest checkpoints on the `main` branch:
 
-1. Find the [latest completed integration tests workflow run on `main`](https://github.com/ZcashFoundation/zebra/actions/workflows/zfnd-ci-integration-tests-gcp.yml?query=branch%3Amain).
+1. Find the [latest completed integration tests workflow run on `main`](https://github.com/zodl-inc/zebra/actions/workflows/zfnd-ci-integration-tests-gcp.yml?query=branch%3Amain).
    Due to GitHub UI issues, some runs will show as waiting, cancelled, or failed,
    but the checkpoints have still been generated.
 2. From the list on the left, find the `Generate checkpoints mainnet` job, then click the
@@ -29,7 +29,7 @@ To find the latest checkpoints on the `main` branch:
 3. Scroll down until you see the list of checkpoints.
 4. Add those checkpoints to the end of `zebra-chain/src/parameters/checkpoint/main-checkpoints.txt`
 5. Repeat steps 2 to 4 for the `Generate checkpoints testnet` job
-6. Open a pull request at <https://github.com/ZcashFoundation/zebra/pulls>
+6. Open a pull request at <https://github.com/zodl-inc/zebra/pulls>
 
 #### Manual Checkpoint Generation
 
@@ -47,7 +47,7 @@ If you are on a Debian system, `zcash-cli` [can be installed as a package](https
 `zebra-checkpoints` is a standalone rust binary, you can compile it using:
 
 ```sh
-cargo install --locked --features zebra-checkpoints --git https://github.com/ZcashFoundation/zebra zebra-utils
+cargo install --locked --features zebra-checkpoints --git https://github.com/zodl-inc/zebra zebra-utils
 ```
 
 #### Checkpoint Generation Commands
@@ -76,7 +76,7 @@ You can see all the `zebra-checkpoints` options using:
 target/release/zebra-checkpoints --help
 ```
 
-For more details about checkpoint lists, see the [`zebra-checkpoints` README.](https://github.com/ZcashFoundation/zebra/tree/main/zebra-chain/src/parameters/checkpoint/README.md)
+For more details about checkpoint lists, see the [`zebra-checkpoints` README.](https://github.com/zodl-inc/zebra/tree/main/zebra-chain/src/parameters/checkpoint/README.md)
 
 #### Checkpoint Generation for Testnet
 
@@ -94,7 +94,7 @@ Then use the commands above to regenerate the checkpoints.
 - If you started from the last checkpoint in the current list, add the checkpoint list to the end
   of the existing checkpoint file. If you started from genesis, replace the entire file.
 - Open a pull request with the updated Mainnet and Testnet lists at:
-  <https://github.com/ZcashFoundation/zebra/pulls>
+  <https://github.com/zodl-inc/zebra/pulls>
 
 ## zebrad-hash-lookup
 
