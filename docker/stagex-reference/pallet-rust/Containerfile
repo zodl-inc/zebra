@@ -1,0 +1,39 @@
+FROM stagex/pallet-clang
+COPY --from=stagex/core-rust . /
+COPY --from=stagex/core-git . /
+COPY --from=stagex/core-busybox . /
+COPY --from=stagex/core-libunwind . /
+COPY --from=stagex/core-openssl . /
+COPY --from=stagex/core-ca-certificates . /
+COPY --from=stagex/core-curl . /
+COPY --from=stagex/core-binutils . /
+COPY --from=stagex/core-pkgconf . /
+
+# The following MUST be done with the same version of LLVM used to build Rust
+# While that would imply `core-rust` should provide these definitions, they _cannot_ be symlinks
+# We can use hard links here, as we can add and export LLVM, but in `core-rust` we'd have to `cp`
+RUN <<-'EOF'
+	RUST_LLVM_ROOT="/usr"
+
+	# Populate Rust's self-contained toolchain's linker
+	# https://github.com/rust-lang/rust/blob/44e34e1ac6d7e69b40856cf1403d3da145319c30/src/bootstrap/src/core/build_steps/dist.rs#L581-L601
+	# https://github.com/rust-lang/rust/blob/44e34e1ac6d7e69b40856cf1403d3da145319c30/src/bootstrap/src/lib.rs#L79-L80
+	SELF_CONTAINED="/usr/lib/rustlib/$(uname -m)-unknown-linux-musl/bin"
+	mkdir -p "${SELF_CONTAINED}"
+	ln "${RUST_LLVM_ROOT}/bin/lld" "${SELF_CONTAINED}/rust-lld"
+	mkdir "${SELF_CONTAINED}/gcc-ld"
+	for bin in ld64.lld ld.lld lld-link wasm-ld; do
+		ln "${RUST_LLVM_ROOT}/bin/${bin}" "${SELF_CONTAINED}/gcc-ld/${bin}"
+	done
+
+	# Populate Rust's self-contained LLVM tools
+	# https://github.com/rust-lang/rust/blob/44e34e1ac6d7e69b40856cf1403d3da145319c30/src/bootstrap/src/core/build_steps/dist.rs#L603-L614
+	ln "${RUST_LLVM_ROOT}/bin/llvm-objcopy" "${SELF_CONTAINED}/rust-objcopy"
+
+	# Remove the legacy LLVM toolchain now that we've populated the self-contained toolchain
+	if [ ! "${RUST_LLVM_ROOT}" = "/usr" ]; then
+		rm -rf "${RUST_LLVM_ROOT}"
+	fi
+EOF
+
+ENTRYPOINT ["/usr/bin/cargo"]
