@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.0.0] - 2026-06-10
+
+### Breaking Changes
+
+- Changed `client::PeerInfo::new()` to take additional `services`, `lastrecv`,
+  `banscore`, `subver`, `version`, and `connection_state` parameters.
+
+### Added
+
+- `getpeerinfo` RPC response now includes `services`, `lastrecv`, `banscore`,
+  `subver`, `version`, and `connection_state` fields
+  ([#10443](https://github.com/ZcashFoundation/zebra/pull/10443)).
+- `client::PeerInfo::services()`, `lastrecv()`, `banscore()`, `subver()`,
+  `version()`, and `connection_state()` accessors.
+
+### Fixed
+
+- `getrawmempool(true)`: avoid rebuilding the mempool address index per
+  transaction, improving performance for large mempools
+  ([#10599](https://github.com/ZcashFoundation/zebra/pull/10599)).
+
 ## [9.0.0] - 2026-06-02
 
 ### Changed
