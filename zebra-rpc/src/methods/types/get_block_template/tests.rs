@@ -21,9 +21,9 @@ use zebra_chain::{
 };
 
 use crate::client::TransactionTemplate;
-use crate::config::mining::{default_miner_address, MinerAddressType};
+use crate::config::mining::{default_miner_address, Config, MinerAddressType};
 
-use super::MinerParams;
+use super::{MinerParams, MinerParamsError};
 
 /// Tests that coinbase transactions can be generated.
 ///
@@ -93,6 +93,88 @@ fn coinbase() -> anyhow::Result<()> {
             }
         }
     }
+
+    Ok(())
+}
+
+/// Tests that the configured `mining.extra_coinbase_data` is embedded verbatim in the coinbase
+/// input script, and that data exceeding the consensus limit is rejected rather than truncated.
+///
+/// Like [`coinbase`], this builds real coinbase transactions, so it needs the `--release` flag to
+/// run in a reasonable time.
+#[test]
+#[ignore]
+fn extra_coinbase_data() -> anyhow::Result<()> {
+    const TAG: &str = "my-test-miner";
+
+    let network = Network::Mainnet;
+    // NU5 is activated on Mainnet, so its funding streams resolve to addresses and the coinbase
+    // builds successfully.
+    let height = NetworkUpgrade::Nu5
+        .activation_height(&network)
+        .ok_or(anyhow!("NU5 must have a Mainnet activation height"))?;
+
+    let miner_address = || -> anyhow::Result<_> {
+        Ok(Some(
+            default_miner_address(network.kind(), &MinerAddressType::Transparent)
+                .parse()
+                .map_err(|_| anyhow!("hard-coded miner address must be valid"))?,
+        ))
+    };
+
+    // A configured tag is included in the coinbase input.
+    let config = Config {
+        miner_address: miner_address()?,
+        extra_coinbase_data: Some(TAG.to_string()),
+        ..Default::default()
+    };
+
+    let miner_params = MinerParams::new(&network, config)?;
+
+    let coinbase: Transaction = TransactionTemplate::new_coinbase(
+        &network,
+        height,
+        &miner_params,
+        Amount::zero(),
+        #[cfg(all(zcash_unstable = "nu7", feature = "tx_v6"))]
+        None,
+    )?
+    .data()
+    .as_ref()
+    .zcash_deserialize_into()?;
+
+    let miner_data = coinbase
+        .inputs()
+        .first()
+        .and_then(|input| input.miner_data())
+        .ok_or(anyhow!(
+            "the first input of a coinbase tx must be a coinbase input"
+        ))?;
+
+    // `extra_coinbase_data` is pushed onto the script sig after the block height, so the configured
+    // bytes appear at the end of the coinbase input data (preceded by a push opcode).
+    assert!(
+        miner_data.ends_with(TAG.as_bytes()),
+        "coinbase input data {miner_data:?} should end with the configured tag {:?}",
+        TAG.as_bytes(),
+    );
+
+    // Data whose encoded length exceeds `MAX_MINER_DATA_LEN` (94 bytes) is rejected when
+    // constructing `MinerParams`, rather than being silently truncated. A 95-byte payload is over
+    // the limit regardless of push encoding.
+    let oversized_config = Config {
+        miner_address: miner_address()?,
+        extra_coinbase_data: Some("a".repeat(95)),
+        ..Default::default()
+    };
+
+    assert!(
+        matches!(
+            MinerParams::new(&network, oversized_config),
+            Err(MinerParamsError::OversizedData)
+        ),
+        "data over MAX_MINER_DATA_LEN must be rejected with OversizedData",
+    );
 
     Ok(())
 }
