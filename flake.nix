@@ -32,6 +32,11 @@
           filter = path: type:
             (builtins.match ".*\\.txt$" path != null)
             || (builtins.match ".*/genesis/.*" path != null)
+            # zebra-rpc/build.rs needs proto/indexer.proto + the pre-generated
+            # proto/__generated__/* (it copies/compares them); keep the whole
+            # proto tree or it fails with NotFound on the generated dir.
+            || (builtins.match ".*/proto/.*" path != null)
+            || (builtins.match ".*\\.proto$" path != null)
             || (craneLib.filterCargoSources path type);
         };
         # The big C/C++ deps decide the toolchain: zebra-script wraps zcash_script
