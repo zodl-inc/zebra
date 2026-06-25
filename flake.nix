@@ -96,12 +96,27 @@
           # zebrad release binary features (matches default-release-binaries).
           cargoExtraArgs = "--locked --package zebrad --bin zebrad";
           CARGO_BUILD_TARGET = muslTarget;
-          # Static musl; use the musl clang as the linker so libc++ + crt resolve
-          # coherently.
-          CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static -C codegen-units=1 -C linker=${clangCC}/bin/cc -C link-arg=-static";
+          # Static musl. The final link pulls in C++ (rocksdb + zcash_script), so
+          # it must use lld + libc++ explicitly — otherwise the default ld.bfd
+          # can't find libc++ and the link fails with ~21k unresolved std::__1::
+          # symbols. -stdlib=libc++ + -lc++ -lc++abi resolve the C++ runtime;
+          # -lm/-lunwind cover math + unwinding under -static. (Same coherent
+          # clang+libc++/musl recipe proven in the raw-musl validation.)
+          CARGO_BUILD_RUSTFLAGS = builtins.concatStringsSep " " [
+            "-C target-feature=+crt-static"
+            "-C codegen-units=1"
+            "-C linker=${clangCC}/bin/cc"
+            "-C link-arg=-static"
+            "-C link-arg=-fuse-ld=lld"
+            "-C link-arg=-stdlib=libc++"
+            "-C link-arg=-lc++"
+            "-C link-arg=-lc++abi"
+            "-C link-arg=-lm"
+            "-C link-arg=-lunwind"
+          ];
           # protoc for tonic-build (zebra-rpc/zebrad); clang for bindgen/*-sys;
           # git because zebrad/build.rs + zebra-rpc/build.rs embed the commit.
-          nativeBuildInputs = with pkgs; [ protobuf llvmPackages_18.clang pkg-config git ];
+          nativeBuildInputs = with pkgs; [ protobuf llvmPackages_18.clang llvmPackages_18.bintools pkg-config git ];
           LIBCLANG_PATH = "${pkgs.llvmPackages_18.libclang.lib}/lib";
           PROTOC = "${pkgs.protobuf}/bin/protoc";
           doCheck = false;
