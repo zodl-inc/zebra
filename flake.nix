@@ -29,14 +29,13 @@
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           name = "source";
+          # zebra embeds many non-Rust data files via include_str!/include_bytes!
+          # that crane's cleanCargoSource drops: genesis blocks + checkpoint
+          # lists (.txt), the proto tree (zebra-rpc build.rs), and cryptographic
+          # parameters like the Groth16 verifying keys (.vk). Keep all of them.
           filter = path: type:
-            (builtins.match ".*\\.txt$" path != null)
-            || (builtins.match ".*/genesis/.*" path != null)
-            # zebra-rpc/build.rs needs proto/indexer.proto + the pre-generated
-            # proto/__generated__/* (it copies/compares them); keep the whole
-            # proto tree or it fails with NotFound on the generated dir.
-            || (builtins.match ".*/proto/.*" path != null)
-            || (builtins.match ".*\\.proto$" path != null)
+            (builtins.match ".*\\.(txt|proto|vk|params|bin|json)$" path != null)
+            || (builtins.match ".*/(genesis|proto)/.*" path != null)
             || (craneLib.filterCargoSources path type);
         };
         # The big C/C++ deps decide the toolchain: zebra-script wraps zcash_script
