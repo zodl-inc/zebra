@@ -29,13 +29,18 @@
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           name = "source";
-          # zebra embeds many non-Rust data files via include_str!/include_bytes!
-          # that crane's cleanCargoSource drops: genesis blocks + checkpoint
-          # lists (.txt), the proto tree (zebra-rpc build.rs), and cryptographic
-          # parameters like the Groth16 verifying keys (.vk). Keep all of them.
+          # zebra embeds MANY non-Rust data files via include_str!/include_bytes!
+          # that crane's cleanCargoSource drops (genesis blocks, checkpoint lists,
+          # the proto tree, Groth16 .vk keys, tracing banners like zebra.utf8 …).
+          # Rather than chase each extension, keep every regular file that lives
+          # under a crate `src/` (or proto/) directory, plus the normal cargo
+          # sources. This is what the upstream Dockerfile effectively does (it
+          # copies the whole worktree), so it matches their build inputs.
           filter = path: type:
-            (builtins.match ".*\\.(txt|proto|vk|params|bin|json)$" path != null)
+            (type == "directory")
+            || (builtins.match ".*/src/.*" path != null)
             || (builtins.match ".*/(genesis|proto)/.*" path != null)
+            || (builtins.match ".*\\.(txt|proto|vk|params|bin|json)$" path != null)
             || (craneLib.filterCargoSources path type);
         };
         # The big C/C++ deps decide the toolchain: zebra-script wraps zcash_script
