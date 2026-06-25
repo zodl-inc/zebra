@@ -56,6 +56,14 @@
         } // {
           "CC_${targetEnvSuffix}" = "${clangCC}/bin/cc";
           "CXX_${targetEnvSuffix}" = "${clangCC}/bin/c++";
+          # rocksdb 8.10 (librocksdb-sys 0.16) was written before libc++/clang
+          # stopped pulling <cstdint> in transitively, so its headers use
+          # uint64_t/int64_t without including it → "unknown type name 'uint64_t'"
+          # (and the override/abstract-class errors cascade from that). Force the
+          # header in for every C/C++ TU of the *-sys crates via the per-target
+          # cc-rs flags.
+          "CFLAGS_${targetEnvSuffix}" = "-include stdint.h";
+          "CXXFLAGS_${targetEnvSuffix}" = "-include cstdint";
         };
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
         zebrad = craneLib.buildPackage (commonArgs // { inherit cargoArtifacts; });
