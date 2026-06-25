@@ -109,6 +109,9 @@
             "-C link-arg=-static"
             "-C link-arg=-fuse-ld=lld"
             "-C link-arg=-stdlib=libc++"
+            # lld can't find -lc++/-lc++abi without their lib dir on the search
+            # path; point -L at the musl libc++ (and its abi) output.
+            "-L ${pkgs.pkgsMusl.llvmPackages_18.libcxx}/lib"
             "-C link-arg=-lc++"
             "-C link-arg=-lc++abi"
             "-C link-arg=-lm"
