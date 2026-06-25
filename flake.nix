@@ -37,7 +37,11 @@
         # hides virtual member function", "out-of-line definition does not match
         # any declaration"). clang 18 compiles rocksdb 8.10 cleanly. (Zallet used
         # the clang-21 default fine because it has no rocksdb.)
-        baseCC = pkgs.pkgsMusl.llvmPackages_18.clangStdenv.cc;
+        # pkgsMusl.llvmPackages_18 exposes `stdenv` (clang) and `libcxxStdenv`
+        # (clang + libc++) — NOT `clangStdenv` (that attr only exists on the
+        # default llvmPackages). We want libc++ for the musl C++ link, so use
+        # libcxxStdenv.cc.
+        baseCC = pkgs.pkgsMusl.llvmPackages_18.libcxxStdenv.cc;
         # rocksdb 8.10 (librocksdb-sys 0.16) uses uint64_t/int64_t without
         # including <cstdint>; gcc pulls it transitively (so ZFND, who build
         # rocksdb with gcc, never hit this), but clang+libc++ — which we NEED for
