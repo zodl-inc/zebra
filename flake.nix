@@ -59,11 +59,17 @@
           # rocksdb 8.10 (librocksdb-sys 0.16) was written before libc++/clang
           # stopped pulling <cstdint> in transitively, so its headers use
           # uint64_t/int64_t without including it → "unknown type name 'uint64_t'"
-          # (and the override/abstract-class errors cascade from that). Force the
-          # header in for every C/C++ TU of the *-sys crates via the per-target
-          # cc-rs flags.
-          "CFLAGS_${targetEnvSuffix}" = "-include stdint.h";
-          "CXXFLAGS_${targetEnvSuffix}" = "-include cstdint";
+          # (the override/abstract-class errors cascade from that). ZFND don't hit
+          # this because they compile rocksdb with GCC (which still pulls cstdint);
+          # we must use clang for the musl/libc++ link, so we force the header.
+          #
+          # NOTE: cargo's CXXFLAGS_<target> is NOT enough — librocksdb-sys's
+          # build.rs sets its own cc-rs flags and drops ours. NIX_CFLAGS_COMPILE
+          # is injected by the clangStdenv cc-WRAPPER on every single C/C++
+          # invocation, so rocksdb can't bypass it. Use <stdint.h> (not <cstdint>)
+          # because the flag hits BOTH C and C++ TUs (lz4-sys/snappy are C) and
+          # stdint.h is valid in both, while cstdint is C++-only.
+          NIX_CFLAGS_COMPILE = "-include stdint.h";
         };
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
         zebrad = craneLib.buildPackage (commonArgs // { inherit cargoArtifacts; });
