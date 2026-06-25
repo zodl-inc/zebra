@@ -53,14 +53,20 @@
         # propagate / librocksdb-sys's build.rs sets its own cc-rs flags). So bake
         # `-include` into a cc/c++ WRAPPER that rocksdb invokes directly — it
         # can't be bypassed. stdint.h for cc (C TUs: lz4/snappy), cstdint for c++.
+        # The wrapper must NOT add -include to assembly (.S) compiles — ring
+        # builds .S files, and injecting a C header there breaks the assembler
+        # ("unexpected token in argument list" from alltypes.h). Only inject the
+        # header when no .S/.s/.asm source is in the args.
         clangCC = pkgs.runCommand "zebra-clang-cstdint" { } ''
           mkdir -p $out/bin
           cat > $out/bin/cc  <<EOF
           #!${pkgs.runtimeShell}
+          for a in "\$@"; do case "\$a" in *.S|*.s|*.asm) exec ${baseCC}/bin/cc "\$@";; esac; done
           exec ${baseCC}/bin/cc -include stdint.h "\$@"
           EOF
           cat > $out/bin/c++ <<EOF
           #!${pkgs.runtimeShell}
+          for a in "\$@"; do case "\$a" in *.S|*.s|*.asm) exec ${baseCC}/bin/c++ "\$@";; esac; done
           exec ${baseCC}/bin/c++ -include cstdint "\$@"
           EOF
           chmod +x $out/bin/cc $out/bin/c++
