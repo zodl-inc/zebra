@@ -23,7 +23,17 @@
           targets = [ muslTarget ];
         };
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-        src = craneLib.cleanCargoSource ./.;
+        # crane's cleanCargoSource keeps only Rust/cargo files, but zebra-chain
+        # embeds data via include_str! (genesis blocks, checkpoint lists, *.txt).
+        # Keep those too, or the build fails with "couldn't read ...txt".
+        src = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          name = "source";
+          filter = path: type:
+            (builtins.match ".*\\.txt$" path != null)
+            || (builtins.match ".*/genesis/.*" path != null)
+            || (craneLib.filterCargoSources path type);
+        };
         # The big C/C++ deps decide the toolchain: zebra-script wraps zcash_script
         # (C++) and librocksdb-sys builds rocksdb (C++) from source via cc-rs.
         # Both need a coherent clang + libc++ built against musl (gcc's libstdc++
