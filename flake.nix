@@ -29,9 +29,15 @@
         # Both need a coherent clang + libc++ built against musl (gcc's libstdc++
         # references glibc-only symbols — __libc_single_threaded, *64 — that don't
         # exist in musl, which is exactly what a raw `cargo --target musl` build
-        # hit). pkgsMusl.clangStdenv is that coherent musl-clang+libc++ toolchain,
-        # the same one that worked for Zallet.
-        clangCC = pkgs.pkgsMusl.clangStdenv.cc;
+        # hit).
+        #
+        # Pin clang 18, NOT the nixpkgs-unstable default (clang 21): clang 21 is
+        # too strict for rocksdb 8.10 (librocksdb-sys 0.16.0+8.10.0) and rejects
+        # its C++ with hard errors ("non-virtual member function marked 'override'
+        # hides virtual member function", "out-of-line definition does not match
+        # any declaration"). clang 18 compiles rocksdb 8.10 cleanly. (Zallet used
+        # the clang-21 default fine because it has no rocksdb.)
+        clangCC = pkgs.pkgsMusl.llvmPackages_18.clangStdenv.cc;
         commonArgs = {
           inherit src;
           strictDeps = true;
@@ -43,8 +49,8 @@
           CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static -C codegen-units=1 -C linker=${clangCC}/bin/cc -C link-arg=-static";
           # protoc for tonic-build (zebra-rpc/zebrad); clang for bindgen/*-sys;
           # git because zebrad/build.rs + zebra-rpc/build.rs embed the commit.
-          nativeBuildInputs = with pkgs; [ protobuf llvmPackages.clang pkg-config git ];
-          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+          nativeBuildInputs = with pkgs; [ protobuf llvmPackages_18.clang pkg-config git ];
+          LIBCLANG_PATH = "${pkgs.llvmPackages_18.libclang.lib}/lib";
           PROTOC = "${pkgs.protobuf}/bin/protoc";
           doCheck = false;
         } // {
