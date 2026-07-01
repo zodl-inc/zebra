@@ -126,3 +126,136 @@ jobs:
           path: /tmp/zebrad-amd64
           if-no-files-found: error
 
+  container_arm64:
+    name: Build arm64 runtime (Nix)
+    needs: [set_env, container_amd64]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/build-arm64-nix.yml
+    with:
+      image-name: zebra
+      dockerhub-namespace: ${{ vars.DOCKERHUB_NAMESPACE || '' }}
+    secrets:
+      dockerhub_username: ${{ secrets.ZODLINC_DOCKERHUB_USERNAME }}
+      dockerhub_password: ${{ secrets.ZODLINC_DOCKERHUB_PASSWORD }}
+
+  # Stitch the amd64 (StageX) + arm64 (Nix) image digests into one multi-arch
+  # OCI index per release tag. Both arches were pushed BY DIGEST (no tags);
+  # `imagetools create` assembles the tags atomically here, so a tag never
+  # exists as single-arch. SLSA provenance re-attested on the final index.
+  manifest:
+    name: Assemble multi-arch image manifest
+    needs: [set_env, container_amd64, container_arm64]
+    if: vars.DOCKERHUB_NAMESPACE != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      NS: ${{ vars.DOCKERHUB_NAMESPACE }}
+      VERSION: ${{ needs.set_env.outputs.version }}
+      AMD64_DIGEST: ${{ needs.container_amd64.outputs.image-digest }}
+      ARM64_DIGEST: ${{ needs.container_arm64.outputs.image-digest }}
+    outputs:
+      index-digest: ${{ steps.create.outputs.index_digest }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Bootstrap buildx builder (anonymous pull, before login)
+        run: docker buildx inspect --bootstrap
+      - name: Log in to Docker Hub
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.ZODLINC_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.ZODLINC_DOCKERHUB_PASSWORD }}
+      - name: Create + push multi-arch tags from the per-arch digests
+        id: create
+        run: |
+          set -Eeuo pipefail
+          REPO="docker.io/${NS}/zebra"
+          SRCS="${REPO}@${AMD64_DIGEST} ${REPO}@${ARM64_DIGEST}"
+          docker buildx imagetools create \
+            -t "${REPO}:${VERSION}" -t "${REPO}:latest" \
+            ${SRCS}
+          IDX=$(docker buildx imagetools inspect "${REPO}:${VERSION}" --format '{{.Manifest.Digest}}')
+          echo "index_digest=${IDX}" >> "$GITHUB_OUTPUT"
+          echo "multi-arch index: ${REPO}:${VERSION} -> ${IDX}"
+      - name: SLSA provenance on the multi-arch index
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: docker.io/${{ env.NS }}/zebra
+          subject-digest: ${{ steps.create.outputs.index_digest }}
+          push-to-registry: true
+
+  # Standalone binaries + .deb, attached ONLY to the GitHub Release (no apt
+  # publish — this fork does not operate apt.z.cash or any ZF registry).
+  release_assets:
+    name: Publish standalone binaries + .deb to the GitHub Release
+    needs: [set_env, container_amd64, container_arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.set_env.outputs.version }}
+      REF_NAME: ${{ needs.set_env.outputs.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.set_env.outputs.ref_name }}
+          persist-credentials: false
+
+      - name: Download amd64 + arm64 runtime binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: zebrad-runtime-linux-*
+          path: build/runtime
+          merge-multiple: false
+
+      - name: Prepare standalone binaries
+        run: |
+          set -Eeuo pipefail
+          mkdir -p standalone
+          cp build/runtime/zebrad-runtime-linux-amd64/zebrad-amd64 "standalone/zebrad-${REF_NAME}-linux-amd64"
+          cp build/runtime/zebrad-runtime-linux-arm64/zebrad        "standalone/zebrad-${REF_NAME}-linux-arm64"
+          chmod +x standalone/*
+          (cd standalone && sha256sum -- * > SHA256SUMS)
+
+      - name: Generate build provenance attestation for binaries
+        id: attest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: |
+            standalone/zebrad-${{ env.REF_NAME }}-linux-amd64
+            standalone/zebrad-${{ env.REF_NAME }}-linux-arm64
+
+      - name: Save attestation bundle
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs['bundle-path'] }}
+        run: cp -- "$BUNDLE_PATH" "standalone/zebrad-${REF_NAME}.intoto.jsonl"
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --version "^2.10" --locked
+
+      - name: Build .deb (amd64, seeded from the StageX binary — no rebuild)
+        run: |
+          set -Eeuo pipefail
+          mkdir -p target/x86_64-unknown-linux-musl/release
+          install -m0755 "standalone/zebrad-${REF_NAME}-linux-amd64" target/x86_64-unknown-linux-musl/release/zebrad
+          cargo deb --no-build --no-strip --target x86_64-unknown-linux-musl -p zebrad -o "zebrad_${VERSION}_amd64.deb"
+
+      - name: Create/Update GitHub Release with all assets
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ env.REF_NAME }}
+          files: |
+            standalone/zebrad-${{ env.REF_NAME }}-linux-amd64
+            standalone/zebrad-${{ env.REF_NAME }}-linux-arm64
+            standalone/SHA256SUMS
+            standalone/zebrad-${{ env.REF_NAME }}.intoto.jsonl
+            zebrad_${{ env.VERSION }}_amd64.deb
