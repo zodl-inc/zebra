@@ -39,6 +39,20 @@ pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target
 pkg-fmt = "tgz"
 bin-dir = "{ bin }{ binary-ext }"
 
+# Consumed by .github/workflows/reproducible-release.yml with `cargo deb
+# --no-build` seeding the binary from the reproducible StageX (amd64) build —
+# not a regular `cargo build`. Kept minimal since zebrad has no build.rs
+# completions/manpages to package (unlike Zallet's).
+[package.metadata.deb]
+name = "zebrad"
+extended-description = """\
+Zebra is the Zcash Foundation's independent, consensus-compatible \
+implementation of a Zcash node."""
+section = "utils"
+assets = [
+    ["target/x86_64-unknown-linux-musl/release/zebrad", "usr/bin/", "755"],
+]
+
 [package.metadata.docs.rs]
 
 # Publish Zebra's supported production and developer features on docs.rs.
