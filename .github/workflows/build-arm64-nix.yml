@@ -49,6 +49,14 @@ jobs:
     outputs:
       image_digest: ${{ steps.push.outputs.digest }}
       image_ref: ${{ steps.push.outputs.image_ref }}
+    env:
+      # Read-only public cache (same bucket the Zallet pipeline warms). Shares
+      # the LLVM/clang/musl toolchain closure across both projects' Nix builds
+      # — without it, a cold LLVM-from-source build here takes 1.5-2+ hours on
+      # a shared arm64 runner (confirmed: cancelled at [2546/3692] LLVM objects
+      # after 108 minutes with no cache configured).
+      NIX_CACHE_URL: https://zodl-nix-cache.s3.us-east-1.amazonaws.com
+      NIX_CACHE_PUBKEY: zodl-nix-cache-1:EqTu1jc+XTV0DOXRhSlzLL981EjuTXnsuyNSwxjHPcU=
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -59,6 +67,8 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
         with:
           extra-conf: |
+            extra-substituters = ${{ env.NIX_CACHE_URL }}
+            extra-trusted-public-keys = ${{ env.NIX_CACHE_PUBKEY }}
             accept-flake-config = true
 
       - name: Build static aarch64-musl zebrad (reproducible)
