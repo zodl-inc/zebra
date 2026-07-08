@@ -82,7 +82,7 @@ jobs:
             Docs: https://github.com/ZcashFoundation/zebra/blob/main/CONTRIBUTING.md#pull-requests
 
       - name: Comment on invalid PR title
-        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 #v3.0.4
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 #v3.0.5
         # null comparison is intentional: the action only sets error_message on failure.
         # When validation passes the output key is absent (null), not empty string.
         # See: https://github.com/amannn/action-semantic-pull-request#outputs
@@ -99,7 +99,7 @@ jobs:
             See the [contribution guide](https://github.com/ZcashFoundation/zebra/blob/main/CONTRIBUTING.md#pull-requests) for details.
 
       - name: Remove comment on valid PR title
-        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 #v3.0.4
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 #v3.0.5
         if: ${{ steps.lint_pr_title.outputs.error_message == null }}
         with:
           header: pr-title-lint-error
