@@ -390,7 +390,7 @@ jobs:
             --metadata=google-logging-enabled=true,google-logging-use-fluentbit=true,google-monitoring-enabled=true \
             --metadata-from-file=startup-script=.github/workflows/scripts/gcp-vm-startup-script.sh \
             --labels="app=${APP_NAME},environment=${WORKFLOW_ENVIRONMENT},network=${NETWORK},github_ref=${GITHUB_REF_SLUG_URL},test=${TEST_ID},commit=${GITHUB_SHA_SHORT},long-test=${IS_LONG_TEST}" \
-            --tags ${{ inputs.app_name }} \
+            --tags "${APP_NAME}" \
             --zone "${zone}"
           }
 
