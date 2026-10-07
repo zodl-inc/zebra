@@ -5,20 +5,19 @@ use std::{
     ops::{Add, Deref, DerefMut, RangeInclusive},
     pin::Pin,
     sync::Arc,
+    time::Instant,
 };
 
 use tower::{BoxError, Service, ServiceExt};
 use zebra_chain::{
-    amount::{DeferredPoolBalanceChange, NegativeAllowed},
+    amount::{Amount, DeferredPoolBalanceChange, NegativeAllowed, NonNegative},
     block::{self, Block, HeightDiff},
     diagnostic::{task::WaitForPanics, CodeTimer},
     history_tree::HistoryTree,
-    orchard,
     parallel::tree::NoteCommitmentTrees,
-    sapling,
+    parameters::Network,
     serialization::SerializationError,
-    sprout,
-    subtree::{NoteCommitmentSubtree, NoteCommitmentSubtreeIndex},
+    subtree::NoteCommitmentSubtreeIndex,
     transaction::{self, UnminedTx},
     transparent::{self, utxos_from_ordered_utxos},
     value_balance::{ValueBalance, ValueBalanceError},
@@ -32,14 +31,19 @@ use crate::{
     ReadResponse, Response,
 };
 use crate::{
-    error::{CommitCheckpointVerifiedError, InvalidateError, LayeredStateError, ReconsiderError},
-    CommitSemanticallyVerifiedError,
+    error::{InvalidateError, LayeredStateError, ReconsiderError},
+    AwaitUtxoError, CommitCheckpointVerifiedError, CommitSemanticallyVerifiedError,
 };
+
+/// The per-pool nullifier types used by the indexer-only [`Spend`] enum, imported here rather than
+/// in the shared import block because they are only referenced under the `indexer` feature.
+#[cfg(feature = "indexer")]
+use zebra_chain::{ironwood, orchard, sapling, sprout};
 
 /// Identify a spend by a transparent outpoint or revealed nullifier.
 ///
 /// This enum implements `From` for [`transparent::OutPoint`], [`sprout::Nullifier`],
-/// [`sapling::Nullifier`], and [`orchard::Nullifier`].
+/// [`sapling::Nullifier`], [`orchard::Nullifier`], and [`ironwood::Nullifier`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg(feature = "indexer")]
 pub enum Spend {
@@ -51,6 +55,8 @@ pub enum Spend {
     Sapling(sapling::Nullifier),
     /// A spend identified by a [`orchard::Nullifier`].
     Orchard(orchard::Nullifier),
+    /// A spend identified by an [`ironwood::Nullifier`].
+    Ironwood(ironwood::Nullifier),
 }
 
 #[cfg(feature = "indexer")]
@@ -78,6 +84,13 @@ impl From<sapling::Nullifier> for Spend {
 impl From<orchard::Nullifier> for Spend {
     fn from(orchard_nullifier: orchard::Nullifier) -> Self {
         Self::Orchard(orchard_nullifier)
+    }
+}
+
+#[cfg(feature = "indexer")]
+impl From<ironwood::Nullifier> for Spend {
+    fn from(ironwood_nullifier: ironwood::Nullifier) -> Self {
+        Self::Ironwood(ironwood_nullifier)
     }
 }
 
@@ -258,6 +271,22 @@ pub struct SemanticallyVerifiedBlock {
     /// A precomputed list of the hashes of the transactions in this block,
     /// in the same order as `block.transactions`.
     pub transaction_hashes: Arc<[transaction::Hash]>,
+
+    /// The local time at which the block verifier received this block, if it passed
+    /// through the block verifier.
+    ///
+    /// Used by `Chain::cmp` to prefer the first-received chain when cumulative works
+    /// are equal, per the protocol specification:
+    ///
+    /// > To break ties between leaf blocks, a node will prefer the block that it received first.
+    ///
+    /// <https://zips.z.cash/protocol/protocol.pdf#blockchain>
+    ///
+    /// This is node-local, in-memory metadata, not consensus data. It is `None` for
+    /// blocks constructed outside the block verifier (checkpoint sync, backup restore,
+    /// tests); `Chain::cmp` treats unstamped blocks as received before any stamped
+    /// block, like `zcashd`'s disk-loaded blocks, which all share `nSequenceId` 0.
+    pub received_time: Option<Instant>,
 }
 
 /// A block ready to be committed directly to the finalized state with
@@ -318,6 +347,11 @@ pub struct ContextuallyVerifiedBlock {
 
     /// The sum of the chain value pool changes of all transactions in this block.
     pub(crate) chain_value_pool_change: ValueBalance<NegativeAllowed>,
+
+    /// The local time at which the block verifier received this block, if it passed
+    /// through the block verifier, copied from the [`SemanticallyVerifiedBlock`] it was
+    /// built from. See that type's `received_time` field for details.
+    pub(crate) received_time: Option<Instant>,
 }
 
 /// Wraps note commitment trees and the history tree together.
@@ -334,21 +368,11 @@ pub struct Treestate {
 impl Treestate {
     #[allow(missing_docs)]
     pub(crate) fn new(
-        sprout: Arc<sprout::tree::NoteCommitmentTree>,
-        sapling: Arc<sapling::tree::NoteCommitmentTree>,
-        orchard: Arc<orchard::tree::NoteCommitmentTree>,
-        sapling_subtree: Option<NoteCommitmentSubtree<sapling_crypto::Node>>,
-        orchard_subtree: Option<NoteCommitmentSubtree<orchard::tree::Node>>,
+        note_commitment_trees: NoteCommitmentTrees,
         history_tree: Arc<HistoryTree>,
     ) -> Self {
         Self {
-            note_commitment_trees: NoteCommitmentTrees {
-                sprout,
-                sapling,
-                sapling_subtree,
-                orchard,
-                orchard_subtree,
-            },
+            note_commitment_trees,
             history_tree,
         }
     }
@@ -493,19 +517,47 @@ impl ContextuallyVerifiedBlock {
     /// the [`Utxo`](transparent::Utxo)s spent by every transparent input in this block,
     /// including UTXOs created by earlier transactions in this block.
     ///
-    /// Note: a [`ContextuallyVerifiedBlock`] isn't actually contextually valid until
-    /// [`Chain::push()`](crate::service::non_finalized_state::Chain::push) returns success.
+    /// `previous_value_pools` and `deferred_pool_balance_change` must use the exact parent.
+    /// This constructor calculates ledger changes, but does not validate coinbase payouts or
+    /// funding outputs. The state service checks parent-dependent subsidy and miner fees before
+    /// pushing the block onto the non-finalized chain.
+    ///
+    /// A [`ContextuallyVerifiedBlock`] is only contextually valid after all state service
+    /// validation succeeds; construction or
+    /// [`Chain::push()`](crate::service::non_finalized_state::Chain::push) alone is not sufficient.
     pub fn with_block_and_spent_utxos(
+        semantically_verified: SemanticallyVerifiedBlock,
+        spent_outputs: HashMap<transparent::OutPoint, transparent::OrderedUtxo>,
+        deferred_pool_balance_change: DeferredPoolBalanceChange,
+        network: &Network,
+        previous_value_pools: ValueBalance<NonNegative>,
+    ) -> Result<Self, ValueBalanceError> {
+        Self::with_block_spent_utxos_and_fees(
+            semantically_verified,
+            spent_outputs,
+            deferred_pool_balance_change,
+            network,
+            previous_value_pools,
+        )
+        .map(|(contextually_verified, _transaction_fees)| contextually_verified)
+    }
+
+    /// Like [`Self::with_block_and_spent_utxos`], and also returns the block's gross transaction
+    /// fees, as returned by [`Block::chain_value_pool_change_and_fees`].
+    pub(crate) fn with_block_spent_utxos_and_fees(
         semantically_verified: SemanticallyVerifiedBlock,
         mut spent_outputs: HashMap<transparent::OutPoint, transparent::OrderedUtxo>,
         deferred_pool_balance_change: DeferredPoolBalanceChange,
-    ) -> Result<Self, ValueBalanceError> {
+        network: &Network,
+        previous_value_pools: ValueBalance<NonNegative>,
+    ) -> Result<(Self, Option<Amount<NonNegative>>), ValueBalanceError> {
         let SemanticallyVerifiedBlock {
             block,
             hash,
             height,
             new_outputs,
             transaction_hashes,
+            received_time,
         } = semantically_verified;
 
         // This is redundant for the non-finalized state,
@@ -514,18 +566,30 @@ impl ContextuallyVerifiedBlock {
         // TODO: fix the tests, and stop adding unrelated outputs.
         spent_outputs.extend(new_outputs.clone());
 
-        Ok(Self {
-            block: block.clone(),
-            hash,
-            height,
-            new_outputs,
-            spent_outputs: spent_outputs.clone(),
-            transaction_hashes,
-            chain_value_pool_change: block.chain_value_pool_change(
-                &utxos_from_ordered_utxos(spent_outputs),
-                deferred_pool_balance_change,
-            )?,
-        })
+        let (chain_value_pool_change, transaction_fees) = block.chain_value_pool_change_and_fees(
+            &utxos_from_ordered_utxos(
+                spent_outputs
+                    .iter()
+                    .map(|(outpoint, utxo)| (*outpoint, utxo.clone())),
+            ),
+            deferred_pool_balance_change,
+            network,
+            previous_value_pools,
+        )?;
+
+        Ok((
+            Self {
+                block,
+                hash,
+                height,
+                new_outputs,
+                spent_outputs,
+                transaction_hashes,
+                chain_value_pool_change,
+                received_time,
+            },
+            transaction_fees,
+        ))
     }
 }
 
@@ -560,6 +624,7 @@ impl SemanticallyVerifiedBlock {
             height,
             new_outputs,
             transaction_hashes,
+            received_time: None,
         }
     }
 }
@@ -585,6 +650,7 @@ impl From<Arc<Block>> for SemanticallyVerifiedBlock {
             height,
             new_outputs,
             transaction_hashes,
+            received_time: None,
         }
     }
 }
@@ -597,6 +663,7 @@ impl From<ContextuallyVerifiedBlock> for SemanticallyVerifiedBlock {
             height: valid.height,
             new_outputs: valid.new_outputs,
             transaction_hashes: valid.transaction_hashes,
+            received_time: valid.received_time,
         }
     }
 }
@@ -609,6 +676,8 @@ impl From<FinalizedBlock> for SemanticallyVerifiedBlock {
             height: finalized.height,
             new_outputs: finalized.new_outputs,
             transaction_hashes: finalized.transaction_hashes,
+            // The finalized state does not track receipt times, so there is no stamp.
+            received_time: None,
         }
     }
 }
@@ -747,6 +816,28 @@ impl MappedRequest for ReconsiderBlockRequest {
     fn map_response(response: Response) -> Self::MappedResponse {
         match response {
             Response::Reconsidered(hashes) => hashes,
+            _ => unreachable!("wrong response variant for request"),
+        }
+    }
+}
+
+/// Request a UTXO, waiting for it to arrive if it is not yet available.
+///
+/// See the [`crate`] documentation and [`Request::AwaitUtxo`] for details.
+#[allow(dead_code)]
+pub struct AwaitUtxoRequest(pub transparent::OutPoint);
+
+impl MappedRequest for AwaitUtxoRequest {
+    type MappedResponse = transparent::Utxo;
+    type Error = AwaitUtxoError;
+
+    fn map_request(self) -> Request {
+        Request::AwaitUtxo(self.0)
+    }
+
+    fn map_response(response: Response) -> Self::MappedResponse {
+        match response {
+            Response::Utxo(utxo) => utxo,
             _ => unreachable!("wrong response variant for request"),
         }
     }
@@ -932,6 +1023,9 @@ pub enum Request {
     /// whether the UTXO remains unspent or is on the best chain, or any chain.
     /// Its purpose is to allow asynchronous script verification or to wait until
     /// the UTXO arrives in the state before validating dependent transactions.
+    ///
+    /// Returns [`Response::Utxo`] with the UTXO, or an [`AwaitUtxoError`] if
+    /// the state stopped responding before the UTXO arrived.
     ///
     /// # Correctness
     ///
@@ -1153,6 +1247,22 @@ pub enum ReadRequest {
     /// [`block::Height`] using `.into()`.
     BlockHeader(HashOrHeight),
 
+    /// Looks up the transparent outputs spent by the non-coinbase inputs of a
+    /// block, using a block hash or height, in the current best chain.
+    ///
+    /// Returns
+    ///
+    /// * [`ReadResponse::SpentOutputs(Some(_))`](ReadResponse::SpentOutputs) with the spent
+    ///   outputs keyed by the spending [`OutPoint`](transparent::OutPoint) if the block is in
+    ///   the best chain;
+    /// * [`ReadResponse::SpentOutputs(None)`](ReadResponse::SpentOutputs) otherwise.
+    ///
+    /// An outpoint whose spent output cannot be found in the best chain is omitted from the
+    /// map, so callers must treat a missing outpoint as "prevout unknown", not an error.
+    ///
+    /// Used by the `getblock` RPC at verbosity 3.
+    SpentOutputs(HashOrHeight),
+
     /// Looks up a transaction by hash in the current best chain.
     ///
     /// Returns
@@ -1269,6 +1379,33 @@ pub enum ReadRequest {
         stop: Option<block::Hash>,
     },
 
+    /// Finds the fork point between the locator `known_blocks` and the best chain.
+    ///
+    /// `known_blocks` is a block locator. Returns the most recent locator entry that is
+    /// on the best chain (the fork point), or `None` if no entry is on the best chain.
+    /// Returns `None` if the state is empty.
+    ///
+    /// This is intentionally a narrow, best-chain-only query: it reports a single
+    /// locator intersection against the best chain. It does not enumerate side-chain
+    /// tips, branch lengths, or per-tip statuses, so it is not a general
+    /// fork-monitoring API in the style of `getchaintips`. Callers that need to
+    /// observe side chains should use a dedicated request rather than building on this
+    /// one.
+    ///
+    /// The read state service rejects this request with an error if `known_blocks`
+    /// is longer than [`MAX_BLOCK_LOCATOR_LENGTH`](zebra_chain::block::MAX_BLOCK_LOCATOR_LENGTH),
+    /// so an untrusted caller cannot force an unbounded number of lookups. A locator
+    /// built the usual way (one hash per standard block-locator height) is always
+    /// within that bound.
+    ///
+    /// Returns
+    ///
+    /// [`ReadResponse::ForkPoint(Option<(block::Height, block::Hash)>)`](ReadResponse::ForkPoint).
+    FindForkPoint {
+        /// Hashes of known blocks, ordered from highest height to lowest height.
+        known_blocks: Vec<block::Hash>,
+    },
+
     /// Looks up a Sapling note commitment tree either by a hash or height.
     ///
     /// Returns
@@ -1286,6 +1423,63 @@ pub enum ReadRequest {
     ///   if the corresponding block contains a Sapling note commitment tree.
     /// * [`ReadResponse::OrchardTree(None)`](crate::ReadResponse::OrchardTree) otherwise.
     OrchardTree(HashOrHeight),
+
+    /// Looks up a Sapling note commitment tree by block hash in any current chain.
+    ///
+    /// Unlike [`SaplingTree`](Self::SaplingTree), this checks every non-finalized chain
+    /// (and the finalized state), so it is immune to reorgs that move a block from the
+    /// best chain onto a still-retained side chain.
+    ///
+    /// Only lookups by hash are supported, because the same height can have different
+    /// treestates in different chain forks.
+    ///
+    /// Returns
+    ///
+    /// * [`ReadResponse::SaplingTree(Some(Arc<NoteCommitmentTree>))`](crate::ReadResponse::SaplingTree)
+    ///   if the corresponding block contains a Sapling note commitment tree.
+    /// * [`ReadResponse::SaplingTree(None)`](crate::ReadResponse::SaplingTree) otherwise.
+    AnyChainSaplingTree(block::Hash),
+
+    /// Looks up an Orchard note commitment tree by block hash in any current chain.
+    ///
+    /// Unlike [`OrchardTree`](Self::OrchardTree), this checks every non-finalized chain
+    /// (and the finalized state), so it is immune to reorgs that move a block from the
+    /// best chain onto a still-retained side chain.
+    ///
+    /// Only lookups by hash are supported, because the same height can have different
+    /// treestates in different chain forks.
+    ///
+    /// Returns
+    ///
+    /// * [`ReadResponse::OrchardTree(Some(Arc<NoteCommitmentTree>))`](crate::ReadResponse::OrchardTree)
+    ///   if the corresponding block contains an Orchard note commitment tree.
+    /// * [`ReadResponse::OrchardTree(None)`](crate::ReadResponse::OrchardTree) otherwise.
+    AnyChainOrchardTree(block::Hash),
+
+    /// Looks up an Ironwood note commitment tree either by a hash or height.
+    ///
+    /// Returns
+    ///
+    /// * [`ReadResponse::IronwoodTree(Some(Arc<NoteCommitmentTree>))`](crate::ReadResponse::IronwoodTree)
+    ///   if the corresponding block contains an Ironwood note commitment tree.
+    /// * [`ReadResponse::IronwoodTree(None)`](crate::ReadResponse::IronwoodTree) otherwise.
+    IronwoodTree(HashOrHeight),
+
+    /// Looks up an Ironwood note commitment tree by block hash in any current chain.
+    ///
+    /// Unlike [`IronwoodTree`](Self::IronwoodTree), this checks every non-finalized chain
+    /// (and the finalized state), so it is immune to reorgs that move a block from the
+    /// best chain onto a still-retained side chain.
+    ///
+    /// Only lookups by hash are supported, because the same height can have different
+    /// treestates in different chain forks.
+    ///
+    /// Returns
+    ///
+    /// * [`ReadResponse::IronwoodTree(Some(Arc<NoteCommitmentTree>))`](crate::ReadResponse::IronwoodTree)
+    ///   if the corresponding block contains an Ironwood note commitment tree.
+    /// * [`ReadResponse::IronwoodTree(None)`](crate::ReadResponse::IronwoodTree) otherwise.
+    AnyChainIronwoodTree(block::Hash),
 
     /// Returns a list of Sapling note commitment subtrees by their indexes, starting at
     /// `start_index`, and returning up to `limit` subtrees.
@@ -1315,9 +1509,23 @@ pub enum ReadRequest {
         limit: Option<NoteCommitmentSubtreeIndex>,
     },
 
+    /// Returns a list of Ironwood note commitment subtrees by their indexes, starting at
+    /// `start_index`, and returning up to `limit` subtrees.
+    ///
+    /// Returns
+    ///
+    /// * [`ReadResponse::IronwoodSubtree(BTreeMap<_, NoteCommitmentSubtreeData<_>>))`](crate::ReadResponse::IronwoodSubtrees)
+    /// * An empty list if there is no subtree at `start_index`.
+    IronwoodSubtrees {
+        /// The index of the first 2^16-leaf subtree to return.
+        start_index: NoteCommitmentSubtreeIndex,
+        /// The maximum number of subtree values to return.
+        limit: Option<NoteCommitmentSubtreeIndex>,
+    },
+
     /// Looks up the balance of a set of transparent addresses.
     ///
-    /// Returns an [`Amount`](zebra_chain::amount::Amount) with the total
+    /// Returns an [`Amount`] with the total
     /// balance of the set of addresses.
     AddressBalance(HashSet<transparent::Address>),
 
@@ -1347,10 +1555,22 @@ pub enum ReadRequest {
     #[cfg(feature = "indexer")]
     SpendingTransactionId(Spend),
 
-    /// Looks up utxos for the provided addresses.
+    /// Looks up utxos for the provided addresses, in the provided height range,
+    /// returning at most `max_entries` of them.
     ///
     /// Returns a type with found utxos and transaction information.
-    UtxosByAddresses(HashSet<transparent::Address>),
+    UtxosByAddresses {
+        /// The addresses to look up utxos for.
+        addresses: HashSet<transparent::Address>,
+
+        /// The blocks to be queried for utxos.
+        height_range: RangeInclusive<block::Height>,
+
+        /// The maximum number of utxos to return, or `None` for no limit.
+        ///
+        /// The limit bounds the index scan, not just the response.
+        max_entries: Option<usize>,
+    },
 
     /// Contextually validates anchors and nullifiers of a transaction on the best chain
     ///
@@ -1381,8 +1601,9 @@ pub enum ReadRequest {
     ///
     /// Returns [`ReadResponse::SolutionRate`]
     SolutionRate {
-        /// The number of blocks to calculate the average difficulty for.
-        num_blocks: usize,
+        /// The number of blocks to calculate the average difficulty for, or `None`
+        /// to use the averaging window at the effective (tip-clamped) height.
+        num_blocks: Option<usize>,
         /// Optionally estimate the network solution rate at the time when this height was mined.
         /// Otherwise, estimate at the current tip height.
         height: Option<block::Height>,
@@ -1430,6 +1651,7 @@ impl ReadRequest {
             ReadRequest::Block(_) => "block",
             ReadRequest::AnyChainBlock(_) => "any_chain_block",
             ReadRequest::BlockAndSize(_) => "block_and_size",
+            ReadRequest::SpentOutputs(_) => "spent_outputs",
             ReadRequest::BlockHeader(_) => "block_header",
             ReadRequest::Transaction(_) => "transaction",
             ReadRequest::AnyChainTransaction(_) => "any_chain_transaction",
@@ -1440,13 +1662,19 @@ impl ReadRequest {
             ReadRequest::BlockLocator => "block_locator",
             ReadRequest::FindBlockHashes { .. } => "find_block_hashes",
             ReadRequest::FindBlockHeaders { .. } => "find_block_headers",
+            ReadRequest::FindForkPoint { .. } => "find_fork_point",
             ReadRequest::SaplingTree { .. } => "sapling_tree",
             ReadRequest::OrchardTree { .. } => "orchard_tree",
+            ReadRequest::AnyChainSaplingTree { .. } => "any_chain_sapling_tree",
+            ReadRequest::AnyChainOrchardTree { .. } => "any_chain_orchard_tree",
+            ReadRequest::IronwoodTree { .. } => "ironwood_tree",
+            ReadRequest::AnyChainIronwoodTree { .. } => "any_chain_ironwood_tree",
             ReadRequest::SaplingSubtrees { .. } => "sapling_subtrees",
             ReadRequest::OrchardSubtrees { .. } => "orchard_subtrees",
+            ReadRequest::IronwoodSubtrees { .. } => "ironwood_subtrees",
             ReadRequest::AddressBalance { .. } => "address_balance",
             ReadRequest::TransactionIdsByAddresses { .. } => "transaction_ids_by_addresses",
-            ReadRequest::UtxosByAddresses(_) => "utxos_by_addresses",
+            ReadRequest::UtxosByAddresses { .. } => "utxos_by_addresses",
             ReadRequest::CheckBestChainTipNullifiersAndAnchors(_) => {
                 "best_chain_tip_nullifiers_anchors"
             }

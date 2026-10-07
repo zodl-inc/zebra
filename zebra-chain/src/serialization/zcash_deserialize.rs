@@ -1,14 +1,15 @@
 //! Converting bytes into Zcash consensus-critical data structures.
 
-use std::{io, net::Ipv6Addr, sync::Arc};
+use std::{io, io::Read, net::Ipv6Addr, sync::Arc};
 
 use super::{AtLeastOne, CompactSizeMessage, SerializationError, MAX_PROTOCOL_MESSAGE_LEN};
 
-/// Initial-allocation cap for `zcash_deserialize_external_count`.
+/// Initial-allocation cap for `zcash_deserialize_external_count` and the bytes
+/// path, `zcash_deserialize_bytes_external_count`.
 ///
 /// 1024 is large enough that honest messages amortize their growth to a few
 /// reallocations.
-const MAX_INITIAL_ALLOCATION: usize = 1024;
+pub(crate) const MAX_INITIAL_ALLOCATION: usize = 1024;
 
 /// Consensus-critical deserialization for Zcash.
 ///
@@ -112,22 +113,33 @@ pub fn zcash_deserialize_external_count<R: io::Read, T: ZcashDeserialize + Trust
 
 /// `zcash_deserialize_external_count`, specialised for raw bytes.
 ///
-/// This allows us to optimize the inner loop into a single call to `read_exact()`.
+/// Reads the bytes in bulk instead of one element at a time, while bounding the
+/// upfront allocation against the peer-supplied `external_count`.
 ///
 /// This function has a `zcash_` prefix to alert the reader that the
 /// serialization in use is consensus-critical serialization, rather than
 /// some other kind of serialization.
 pub fn zcash_deserialize_bytes_external_count<R: io::Read>(
     external_count: usize,
-    mut reader: R,
+    reader: R,
 ) -> Result<Vec<u8>, SerializationError> {
     if external_count > MAX_U8_ALLOCATION {
         return Err(SerializationError::Parse(
             "Byte vector longer than MAX_U8_ALLOCATION",
         ));
     }
-    let mut vec = vec![0u8; external_count];
-    reader.read_exact(&mut vec)?;
+    // `external_count` is peer-supplied, so grow the buffer as bytes arrive instead of reserving it all.
+    let mut vec = Vec::with_capacity(external_count.min(MAX_INITIAL_ALLOCATION));
+    let count = reader.take(external_count as u64).read_to_end(&mut vec)?;
+    if count != external_count {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "reader ended before external_count bytes were read",
+        )
+        .into());
+    }
+    // `read_to_end` grows by doubling, so drop the excess capacity on large fields.
+    vec.shrink_to_fit();
     Ok(vec)
 }
 
@@ -167,6 +179,24 @@ impl ZcashDeserialize for Ipv6Addr {
 
         Ok(Ipv6Addr::from(ipv6_addr))
     }
+}
+
+/// Consensus-critical deserialization with additional context.
+///
+/// Some types (e.g., `Transaction`, `Block`) require external context for
+/// deserialization that is not present in the byte stream itself. For example,
+/// `zcash_primitives::transaction::Transaction::read()` requires a `BranchId`
+/// which, for pre-V5 transactions, must be derived from the block height and
+/// network.
+///
+/// This trait extends `ZcashDeserialize` for types that need context without
+/// changing the signature of the context-free trait.
+pub trait ZcashDeserializeWithContext<C>: Sized {
+    /// Try to read `self` from the given `reader`, using the provided `context`.
+    fn zcash_deserialize_with_context<R: io::Read>(
+        reader: R,
+        context: &C,
+    ) -> Result<Self, SerializationError>;
 }
 
 /// Helper for deserializing more succinctly via type inference

@@ -2,7 +2,7 @@
 
 use group::{
     ff::{FromUniformBytes, PrimeField},
-    prime::PrimeCurveAffine,
+    CurveAffine,
 };
 use halo2::pasta::pallas;
 use reddsa::{orchard::SpendAuth, Signature, SigningKey, VerificationKey, VerificationKeyBytes};
@@ -105,7 +105,7 @@ impl Arbitrary for SpendAuthVerificationKeyBytes {
                 // Convert that back to a (canonical) encoding
                 let sk_bytes = sk_scalar.to_repr();
                 // Decode it into a signing key
-                let sk = SigningKey::try_from(sk_bytes).unwrap();
+                let sk = SigningKey::from_bytes(&sk_bytes).unwrap();
                 let pk = VerificationKey::<SpendAuth>::from(&sk);
                 SpendAuthVerificationKeyBytes(pk.into())
             })
@@ -119,7 +119,14 @@ impl Arbitrary for Flags {
     type Parameters = ();
 
     fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-        (any::<u8>()).prop_map(Self::from_bits_truncate).boxed()
+        // Only generate flags valid for Orchard-pool bundles: bit 2 (`ENABLE_CROSS_ADDRESS`) is
+        // reserved for the Orchard pool in every transaction version (v5 and v6), so generating
+        // it would produce Orchard bundles that do not round-trip. Only the Ironwood bundle
+        // permits that flag; its strategy re-generates the flags (see `ironwood::ShieldedData`).
+        let pre_nu6_3 = Self::ENABLE_SPENDS.bits() | Self::ENABLE_OUTPUTS.bits();
+        (any::<u8>())
+            .prop_map(move |bits| Self::from_bits_truncate(bits & pre_nu6_3))
+            .boxed()
     }
 
     type Strategy = BoxedStrategy<Self>;

@@ -14,6 +14,11 @@ RUST_BACKTRACE="1"
 # Workaround for GCC 15+: librocksdb-sys / libzcash_script vendored C++ relies on transitive <cstdint>.
 CXXFLAGS = { value = "-include cstdint", force = false, relative = false }
 
+[resolver]
+# Prefer dependency versions that build on our MSRV, instead of picking the
+# newest version and failing on the oldest supported toolchain.
+incompatible-rust-versions = "fallback"
+
 [profile.profiling]
 inherits = "release"
 debug = true

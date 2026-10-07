@@ -100,7 +100,6 @@ use std::{
     marker::PhantomData,
     net::IpAddr,
     pin::Pin,
-    sync::Arc,
     task::{Context, Poll},
     time::Instant,
 };
@@ -112,7 +111,6 @@ use futures::{
     stream::FuturesUnordered,
     task::noop_waker,
 };
-use indexmap::IndexMap;
 use itertools::Itertools;
 use num_integer::div_ceil;
 use tokio::{
@@ -129,6 +127,7 @@ use zebra_chain::{chain_tip::ChainTip, parameters::Network};
 
 use crate::{
     address_book::AddressMetrics,
+    connection_metrics::network_kind_label,
     constants::MIN_PEER_SET_LOG_INTERVAL,
     peer::{LoadTrackedClient, MinimumPeerVersion},
     peer_set::{
@@ -137,10 +136,10 @@ use crate::{
         InventoryChange, InventoryRegistry,
     },
     protocol::{
-        external::InventoryHash,
+        external::{connection_limit_key, InventoryHash},
         internal::{Request, Response},
     },
-    BoxError, Config, PeerError, PeerSocketAddr, SharedPeerError,
+    BanList, BoxError, Config, PeerError, PeerSocketAddr, SharedPeerError,
 };
 
 #[cfg(test)]
@@ -208,8 +207,8 @@ where
     /// A channel that asks the peer crawler task to connect to more peers.
     demand_signal: mpsc::Sender<MorePeers>,
 
-    /// A watch channel receiver with a copy of banned IP addresses.
-    bans_receiver: watch::Receiver<Arc<IndexMap<IpAddr, std::time::Instant>>>,
+    /// A watch channel receiver with a snapshot of the banned peer groups.
+    bans_receiver: watch::Receiver<BanList>,
 
     /// Tracks peers returning empty `FindBlocks`/`FindHeaders` responses.
     /// Mutated only from [`Self::poll_ready`] via [`Self::stall_event_rx`].
@@ -243,6 +242,27 @@ where
         tokio::sync::mpsc::Sender<ResponseFuture>,
         HashSet<D::Key>,
     )>,
+
+    /// Inbound peer IPs that must always receive block inventory broadcasts.
+    block_gossip_peer_ips: HashSet<IpAddr>,
+
+    /// The keys of connected peers that matched [`Self::block_gossip_peer_ips`]
+    /// when they were inserted into the peer set.
+    ///
+    /// Stale keys of disconnected peers are pruned by
+    /// [`Self::prune_disconnected_sidecar_keys`].
+    zcashd_compat_peer_keys: HashSet<D::Key>,
+
+    /// The most recent sidecar broadcast (a block advert or a pushed
+    /// transaction) that has not been delivered to all connected zcashd-compat
+    /// sidecar peers, and the sidecar peers that are still owed it.
+    ///
+    /// A sidecar can be busy with another request when a broadcast is routed.
+    /// The request is queued here and delivered as soon as the sidecar is
+    /// ready again, so configured sidecars never miss block gossip. A newer
+    /// broadcast replaces an older undelivered one, even one of a different
+    /// kind.
+    queued_sidecar_broadcast: Option<(Request, HashSet<D::Key>)>,
 
     // Peer Tracking: Busy Peers
     //
@@ -291,7 +311,7 @@ where
     last_peer_log: Option<Instant>,
 
     /// The configured maximum number of peers that can be in the
-    /// peer set per IP, defaults to [`crate::constants::DEFAULT_MAX_CONNS_PER_IP`]
+    /// peer set per connection limit key, defaults to [`crate::constants::DEFAULT_MAX_CONNS_PER_IP`]
     max_conns_per_ip: usize,
 
     /// The network of this peer set.
@@ -324,6 +344,7 @@ where
     ///
     /// Arguments:
     /// - `config`: configures the peer set connection limit;
+    /// - `block_gossip_peer_ips`: inbound peer IPs that must always receive block inventory broadcasts.
     /// - `discover`: handles peer connects and disconnects;
     /// - `demand_signal`: requests more peers when all peers are busy (unready);
     /// - `handle_rx`: receives background task handles,
@@ -335,15 +356,16 @@ where
     /// - `address_book`: when peer set is busy, it logs address book diagnostics.
     /// - `minimum_peer_version`: endpoint to see the minimum peer protocol version in real time.
     /// - `max_conns_per_ip`: configured maximum number of peers that can be in the
-    ///   peer set per IP, defaults to the config value or to
+    ///   peer set per connection limit key, defaults to the config value or to
     ///   [`crate::constants::DEFAULT_MAX_CONNS_PER_IP`].
     pub fn new(
         config: &Config,
+        block_gossip_peer_ips: Vec<IpAddr>,
         discover: D,
         demand_signal: mpsc::Sender<MorePeers>,
         handle_rx: tokio::sync::oneshot::Receiver<Vec<JoinHandle<Result<(), BoxError>>>>,
         inv_stream: broadcast::Receiver<InventoryChange>,
-        bans_receiver: watch::Receiver<Arc<IndexMap<IpAddr, std::time::Instant>>>,
+        bans_receiver: watch::Receiver<BanList>,
         address_metrics: watch::Receiver<AddressMetrics>,
         minimum_peer_version: MinimumPeerVersion<C>,
         max_conns_per_ip: Option<usize>,
@@ -366,6 +388,9 @@ where
             // Request Routing
             inventory_registry: InventoryRegistry::new(inv_stream),
             queued_broadcast_all: None,
+            block_gossip_peer_ips: block_gossip_peer_ips.into_iter().collect(),
+            zcashd_compat_peer_keys: HashSet::new(),
+            queued_sidecar_broadcast: None,
 
             // Busy peers
             unready_services: FuturesUnordered::new(),
@@ -561,7 +586,7 @@ where
                 Some(Ok((key, svc))) => {
                     trace!(?key, "service became ready");
 
-                    if self.bans_receiver.borrow().contains_key(&key.ip()) {
+                    if self.bans_receiver.borrow().is_banned(key.ip()) {
                         warn!(?key, "service is banned, dropping service");
                         std::mem::drop(svc);
                         let cancel = self.cancel_handles.remove(&key);
@@ -642,7 +667,7 @@ where
             match peer_readiness {
                 // Still ready, add it back to the list.
                 Ok(()) => {
-                    if self.bans_receiver.borrow().contains_key(&key.ip()) {
+                    if self.bans_receiver.borrow().is_banned(key.ip()) {
                         debug!(?key, "service ip is banned, dropping service");
                         std::mem::drop(svc);
                         continue;
@@ -668,18 +693,22 @@ where
         }
     }
 
-    /// Returns the number of peer connections Zebra already has with
-    /// the provided IP address
+    /// Returns the number of peer connections Zebra already has with the
+    /// provided IPv4 address, or in the same IPv6 `/64` subnet.
+    ///
+    /// Peer set admission uses this count to enforce
+    /// [`Config::max_connections_per_ip`](crate::config::Config).
     ///
     /// # Performance
     ///
     /// This method is `O(connected peers)`, so it should not be called from a loop
     /// that is already iterating through the peer set.
     fn num_peers_with_ip(&self, ip: IpAddr) -> usize {
+        let limit_key = connection_limit_key(ip);
         self.ready_services
             .keys()
             .chain(self.cancel_handles.keys())
-            .filter(|addr| addr.ip() == ip)
+            .filter(|addr| connection_limit_key(addr.ip()) == limit_key)
             .count()
     }
 
@@ -736,13 +765,26 @@ where
                         continue;
                     }
 
+                    // Classify sidecars before the per-IP cap: a trusted sidecar
+                    // reconnecting from a new ephemeral port must not be blocked
+                    // by its own not-yet-swept dead connection still counting
+                    // against `max_conns_per_ip` (which defaults to 1), or the
+                    // wallet would silently stop following the chain.
+                    let is_sidecar = self.is_zcashd_compat_peer(&svc);
+
                     // # Security
                     //
                     // drop the new peer if there are already `max_conns_per_ip` peers with
-                    // the same IP address in the peer set.
-                    if self.num_peers_with_ip(key.ip()) >= self.max_conns_per_ip {
+                    // the same IPv4 address, or in the same IPv6 `/64` subnet. Sidecars are
+                    // exempt: they are trusted, and the listener already caps their inbound
+                    // slots.
+                    if !is_sidecar && self.num_peers_with_ip(key.ip()) >= self.max_conns_per_ip {
                         std::mem::drop(svc);
                         continue;
+                    }
+
+                    if is_sidecar {
+                        self.zcashd_compat_peer_keys.insert(key);
                     }
 
                     self.push_unready(key, svc);
@@ -803,6 +845,13 @@ where
     /// If the peer does not exist, does nothing.
     fn remove(&mut self, key: &D::Key) {
         self.find_response_stalls.clear(*key);
+        self.zcashd_compat_peer_keys.remove(key);
+        if let Some((_, remaining_sidecars)) = self.queued_sidecar_broadcast.as_mut() {
+            remaining_sidecars.remove(key);
+            if remaining_sidecars.is_empty() {
+                self.queued_sidecar_broadcast = None;
+            }
+        }
 
         if let Some(ready_service) = self.take_ready_service(key) {
             // A ready service has no work to cancel, so just drop it.
@@ -878,7 +927,7 @@ where
             len => {
                 // Choose 2 random peers, then return the least loaded of those 2 peers.
                 let (a, b) = {
-                    let idxs = rand::seq::index::sample(&mut rand::thread_rng(), len, 2);
+                    let idxs = rand::seq::index::sample(&mut rand::rng(), len, 2);
                     let a = idxs.index(0);
                     let b = idxs.index(1);
 
@@ -923,7 +972,60 @@ where
         self.ready_services
             .keys()
             .copied()
-            .choose_multiple(&mut rand::thread_rng(), max_peers)
+            .sample(&mut rand::rng(), max_peers)
+    }
+
+    /// Randomly chooses ready peers for a sidecar broadcast, always including
+    /// configured zcashd compat sidecar peers.
+    fn select_sidecar_broadcast_peers(&self, max_peers: usize) -> Vec<D::Key> {
+        use rand::seq::IteratorRandom;
+
+        let mut selected_peers: Vec<_> = self
+            .zcashd_compat_peer_keys
+            .iter()
+            .filter(|key| self.ready_services.contains_key(*key))
+            .copied()
+            .collect();
+
+        selected_peers.extend(
+            self.ready_services
+                .keys()
+                .filter(|key| !self.zcashd_compat_peer_keys.contains(key))
+                .copied()
+                .sample(&mut rand::rng(), max_peers),
+        );
+
+        selected_peers
+    }
+
+    /// Returns true if `service` is a configured zcashd sidecar peer.
+    ///
+    /// Only used to classify peers once, when they are inserted into the peer
+    /// set; every later check uses the O(1) [`Self::zcashd_compat_peer_keys`]
+    /// set instead.
+    fn is_zcashd_compat_peer(&self, service: &D::Service) -> bool {
+        self.block_gossip_peer_ips
+            .iter()
+            .any(|ip| service.is_inbound_direct_from_ip(ip))
+    }
+
+    /// Forgets sidecar keys whose peer has disconnected.
+    ///
+    /// A connected peer is either ready or unready with a registered cancel
+    /// handle; a key in neither map belongs to a dropped connection. Sidecars
+    /// reconnect from new ephemeral ports, and services are dropped on many
+    /// paths (bans, version downgrades, cancelled requests), so this runs every
+    /// poll cycle to keep the set from accumulating stale keys — otherwise a
+    /// reused port could inherit a stale sidecar's stall-tracking exemption.
+    fn prune_disconnected_sidecar_keys(&mut self) {
+        if self.zcashd_compat_peer_keys.is_empty() {
+            return;
+        }
+
+        let ready_services = &self.ready_services;
+        let cancel_handles = &self.cancel_handles;
+        self.zcashd_compat_peer_keys
+            .retain(|key| ready_services.contains_key(key) || cancel_handles.contains_key(key));
     }
 
     /// Accesses a ready endpoint by `key` and returns its current load.
@@ -943,10 +1045,20 @@ where
                 .take_ready_service(&p2c_key)
                 .expect("selected peer must be ready");
 
-            let track_stalls = matches!(
+            let is_find_request = matches!(
                 &req,
                 Request::FindBlocks { .. } | Request::FindHeaders { .. }
             );
+            let is_syncing = || {
+                !self
+                    .minimum_peer_version
+                    .chain_tip()
+                    .is_at_or_near_network_tip(chrono::Utc::now())
+            };
+            // zcashd-compat sidecars are exempt: they sync *from* this node,
+            // so they can legitimately trail it without being stalled peers.
+            let track_stalls =
+                is_find_request && !self.zcashd_compat_peer_keys.contains(&p2c_key) && is_syncing();
 
             let fut = svc.call(req);
             self.push_unready(p2c_key, svc);
@@ -1125,6 +1237,79 @@ where
         self.route_multiple(req, self.number_of_peers_to_broadcast())
     }
 
+    /// Broadcasts a request to sampled peers and all configured sidecars.
+    ///
+    /// Used for requests that sidecars must always receive: block adverts and
+    /// pushed transactions. Connected sidecars that are busy with another
+    /// request are owed it: the request is queued and delivered by
+    /// [`Self::send_queued_sidecar_broadcast`] as soon as they are ready again.
+    fn route_sidecar_broadcast(
+        &mut self,
+        req: Request,
+    ) -> <Self as tower::Service<Request>>::Future {
+        self.prune_disconnected_sidecar_keys();
+
+        let selected_peers =
+            self.select_sidecar_broadcast_peers(self.number_of_peers_to_broadcast());
+
+        // A newer broadcast supersedes any older undelivered one, even one of
+        // a different kind. Sidecars only need the latest block advert to stay
+        // live: they fetch any blocks in between over the same connection.
+        let busy_sidecars: HashSet<D::Key> = self
+            .zcashd_compat_peer_keys
+            .iter()
+            .filter(|key| !self.ready_services.contains_key(*key))
+            .copied()
+            .collect();
+        self.queued_sidecar_broadcast =
+            (!busy_sidecars.is_empty()).then(|| (req.clone(), busy_sidecars));
+
+        self.send_multiple(req, selected_peers)
+    }
+
+    /// Delivers the queued sidecar broadcast to any owed sidecar peers that
+    /// have become ready. See [`Self::route_sidecar_broadcast`].
+    fn send_queued_sidecar_broadcast(&mut self) {
+        let Some((req, mut remaining_sidecars)) = self.queued_sidecar_broadcast.take() else {
+            return;
+        };
+
+        // Like `broadcast_all_queued`, don't deliver to peers that were banned
+        // while the request was queued.
+        let bans = self.bans_receiver.borrow().clone();
+        remaining_sidecars.retain(|key| !bans.is_banned(key.ip()));
+
+        let ready_sidecars: Vec<D::Key> = remaining_sidecars
+            .iter()
+            .filter(|key| self.ready_services.contains_key(*key))
+            .copied()
+            .collect();
+        for key in ready_sidecars {
+            remaining_sidecars.remove(&key);
+
+            let mut svc = self
+                .take_ready_service(&key)
+                .expect("sidecars are ready because they were filtered from ready_services above");
+            let req_fut = svc.call(req.clone());
+            self.push_unready(key, svc);
+
+            // Detach the response future: the connection cancels requests whose
+            // response channel is dropped, and there is no caller left to drive
+            // this delivery.
+            tokio::spawn(req_fut.map(|_| ()));
+        }
+
+        // Drop sidecars that disconnected while the request was queued.
+        let ready_services = &self.ready_services;
+        let cancel_handles = &self.cancel_handles;
+        remaining_sidecars
+            .retain(|key| ready_services.contains_key(key) || cancel_handles.contains_key(key));
+
+        if !remaining_sidecars.is_empty() {
+            self.queued_sidecar_broadcast = Some((req, remaining_sidecars));
+        }
+    }
+
     /// Broadcasts the same request to all ready peers, ignoring return values.
     fn broadcast_all(&mut self, req: Request) -> <Self as tower::Service<Request>>::Future {
         let ready_peers = self.ready_services.keys().copied().collect();
@@ -1174,7 +1359,7 @@ where
         };
 
         let bans = self.bans_receiver.borrow().clone();
-        remaining_peers.retain(|addr| !bans.contains_key(&addr.ip()));
+        remaining_peers.retain(|addr| !bans.is_banned(addr.ip()));
 
         let Ok(reserved_send_slot) = sender.try_reserve() else {
             self.queued_broadcast_all = Some((req, sender, remaining_peers));
@@ -1311,9 +1496,10 @@ where
         let num_ready = self.ready_services.len();
         let num_unready = self.unready_services.len();
         let num_peers = num_ready + num_unready;
-        metrics::gauge!("pool.num_ready").set(num_ready as f64);
-        metrics::gauge!("pool.num_unready").set(num_unready as f64);
-        metrics::gauge!("zcash.net.peers").set(num_peers as f64);
+        let network = network_kind_label(&self.network);
+        metrics::gauge!("pool.num_ready", "network" => network).set(num_ready as f64);
+        metrics::gauge!("pool.num_unready", "network" => network).set(num_unready as f64);
+        metrics::gauge!("zcash.net.peers", "network" => network).set(num_peers as f64);
 
         // Security: make sure we haven't exceeded the connection limit
         if num_peers > self.peerset_total_connection_limit {
@@ -1391,7 +1577,9 @@ where
             return Poll::Pending;
         }
 
+        self.prune_disconnected_sidecar_keys();
         self.broadcast_all_queued();
+        self.send_queued_sidecar_broadcast();
 
         if self.ready_services.is_empty() {
             self.poll_peers(cx)
@@ -1414,8 +1602,12 @@ where
 
             // Broadcast advertisements to lots of peers
             Request::AdvertiseTransactionIds(_, _) => self.route_broadcast(req),
-            Request::AdvertiseBlock(_, _) => self.route_broadcast(req),
             Request::AdvertiseBlockToAll(_) => self.broadcast_all(req),
+
+            // Broadcasts that must always reach the configured zcashd-compat sidecar peers
+            Request::AdvertiseBlock(_, _) | Request::PushTransaction(_, _) => {
+                self.route_sidecar_broadcast(req)
+            }
 
             // Choose a random less-loaded peer for all other requests
             _ => self.route_p2c(req),

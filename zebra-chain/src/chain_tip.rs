@@ -2,7 +2,7 @@
 
 use std::{future, sync::Arc};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 
 use crate::{block, parameters::Network, transaction, BoxError};
 
@@ -14,6 +14,14 @@ pub mod mock;
 mod tests;
 
 pub use network_chain_tip_height_estimator::NetworkChainTipHeightEstimator;
+
+/// The maximum age of the best tip considered "at or near tip".
+///
+/// Preserves the allowance of 1,000 blocks at Blossom's 75-second spacing: 20 hours
+/// and 50 minutes. A time limit avoids shortening this tolerance when NU7 activates.
+/// This allows normal block-time variance and propagation delay without enabling
+/// peer stall detection during long gaps between blocks.
+pub const AT_OR_NEAR_TIP_MAX_AGE: Duration = Duration::seconds(75_000);
 
 /// An interface for querying the chain tip.
 ///
@@ -117,6 +125,15 @@ pub trait ChainTip {
         let distance_to_tip = estimator.estimate_height_at(Utc::now()) - current_height;
 
         Some((distance_to_tip, current_height))
+    }
+
+    /// Returns `true` if the node is at or near the network chain tip.
+    ///
+    /// Returns `false` if the chain is empty or its best tip is older than
+    /// [`AT_OR_NEAR_TIP_MAX_AGE`], meaning stall detection should remain active.
+    fn is_at_or_near_network_tip(&self, now: DateTime<Utc>) -> bool {
+        self.best_tip_height_and_block_time()
+            .is_some_and(|(_, block_time)| now - block_time <= AT_OR_NEAR_TIP_MAX_AGE)
     }
 }
 

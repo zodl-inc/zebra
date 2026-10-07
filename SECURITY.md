@@ -18,41 +18,97 @@ Specifically, we will:
 
 ## Receiving Disclosures
 
-The Zcash Foundation is committed to working with researchers who submit security vulnerability notifications to us to resolve those issues on an appropriate timeline and perform a coordinated release, giving credit to the reporter if they would like.
+The Zcash Foundation is committed to working with researchers who submit
+security vulnerability notifications to us to resolve those issues on an
+appropriate timeline and perform a coordinated release, giving credit to the
+reporter if they would like. We align our reporting channels with the broader
+Zcash ecosystem disclosure process.
 
-Please submit issues to <security@zfnd.org>, using the following PGP Key:
+### Before You Report
+
+Before submitting a report, confirm that the issue affects the latest Zebra
+release (<https://github.com/ZcashFoundation/zebra/releases/latest>) or the
+current `main` branch. Any proof of concept must be tested against one of
+those two versions — reports reproduced only on older releases, forks, or
+modified builds may not represent a vulnerability in current code and take
+substantially longer to triage.
+
+In your report, state the exact release version or `main` commit hash you
+tested against.
+
+Reports against `main` are welcome and part of how we catch issues before they
+ship. Note that findings which exist only in unreleased code are handled
+differently from findings in a shipped release; see "Advisories, CVEs, and
+Credit" below.
+
+For critical vulnerabilities, notify us on Signal. Create a new Signal group
+(do not reuse a previous group for a separate issue) that includes all of the
+following handles:
+
+- `pilizcash.01`
+- `conrado.42`
+- `dc_zf.77`
+
+Treat a vulnerability as critical if it could cause consensus divergence or a
+chain split, loss or counterfeiting of funds, a persistent node halt, state
+corruption, or remote compromise of a node.
+
+For all other vulnerabilities, use the GitHub "Report a Vulnerability" feature
+for Zebra at <https://github.com/ZcashFoundation/zebra/security/advisories>.
+
+If you cannot reach us by Signal or GitHub, fall back to email at
+<security@zfnd.org> using the following PGP key. We no longer treat email as a
+primary or fully reliable reporting channel, so use it only when the channels
+above are unavailable. The key may also be used to encrypt follow-up material
+once contact is established.
+
+The key is `Zcash Foundation Security Team <security@zfnd.org>`, fingerprint
+`7550 C36C 3DF6 16A6 9F1E FE00 6046 DDEF 94CF 99B5`, valid until 2028-03-03.
+Verify the fingerprint before encrypting to this key.
 
 ```
 -----BEGIN PGP PUBLIC KEY BLOCK-----
 
-mDMEaXswoxYJKwYBBAHaRw8BAQdA/CQqZ79S7A9OWZeYhY3AbMuTx2d41/pcehNc
-Z1ZF7r6IeAQgFgoAIBYhBOezJEDaeE6/uKooRf1tVVkb+SvKBQJpezIJAh0AAAoJ
-EP1tVVkb+SvKmqQBAMzp/pOZ/ifM0Tjuqzy4nTo8HT5xZwTfL84A40VURuElAP91
-/9wi+5ZKW09pdjHjag6tz0FhheinX1BEDbgww2u3CbQkWmNhc2ggRm91bmRhdGlv
-biA8c2VjdXJpdHlAemZuZC5vcmc+iJYEExYKAD4WIQTnsyRA2nhOv7iqKEX9bVVZ
-G/krygUCaXswowIbAwUJACeNAAULCQgHAwUVCgkICwUWAgMBAAIeAQIXgAAKCRD9
-bVVZG/kryrS4AQCiyknTREsLCICWdbaJUARuZifhDxXIKH0oest8y8HQQwD9HuRd
-936Cg5FbXHpBuF71fGU213OSgulG4+hr7rXdfgy4OARpezCjEgorBgEEAZdVAQUB
-AQdAw5WBljp9hoqi8lu2KU5QzNuv/1lpeGWoESdWg/GZKUIDAQgHiH4EGBYKACYW
-IQTnsyRA2nhOv7iqKEX9bVVZG/krygUCaXswowIbDAUJACeNAAAKCRD9bVVZG/kr
-yjsWAQCiRiecQ9P3DPyQ/E/N0Dl3z4jE2fM2NjhROnX4jB/lDgD8Cru6rg2sdxTc
-RHrjNOriwH3PxwALJorvERC1gl47jQ2YMwRpqByGFgkrBgEEAdpHDwEBB0DV0fxs
-U5skejT0UERNZbec7GGe7Vs7s1h0moC4vkuY87QyWmNhc2ggRm91bmRhdGlvbiBT
-ZWN1cml0eSBUZWFtIDxzZWN1cml0eUB6Zm5kLm9yZz6IlgQTFgoAPhYhBHVQw2w9
-9hamnx7+AGBG3e+Uz5m1BQJpqByGAhsDBQkDwmcABQsJCAcDBRUKCQgLBRYCAwEA
-Ah4BAheAAAoJEGBG3e+Uz5m18MoBAOulghTZ717buHwBKBZupdXMdYPZcNSxlFC1
-+ROt3iYAAP0RfQPw/UYLQlsnc5JEov2pExVpdXJH4waJjh+r26ZQCbg4BGmoHIYS
-CisGAQQBl1UBBQEBB0BXtdSydYIV586tkyNwAefvnQM0pJapklUbVD9f9AmQHAMB
-CAeIfgQYFgoAJhYhBHVQw2w99hamnx7+AGBG3e+Uz5m1BQJpqByGAhsMBQkDwmcA
-AAoJEGBG3e+Uz5m14rEA/0x/2XNwKd4buCm1tOGpTMaLQRoWhos6L/0wV9LExEKG
-AQC1Wmyb9ul/2QNi//8sKNDfaYbn3h6OU45BTAWggp+ACQ==
-=RIK0
+mDMEaagchhYJKwYBBAHaRw8BAQdA1dH8bFObJHo09FBETWW3nOxhnu1bO7NYdJqA
+uL5LmPO0MlpjYXNoIEZvdW5kYXRpb24gU2VjdXJpdHkgVGVhbSA8c2VjdXJpdHlA
+emZuZC5vcmc+iJYEExYKAD4WIQR1UMNsPfYWpp8e/gBgRt3vlM+ZtQUCaagchgIb
+AwUJA8JnAAULCQgHAwUVCgkICwUWAgMBAAIeAQIXgAAKCRBgRt3vlM+ZtfDKAQDr
+pYIU2e9e27h8ASgWbqXVzHWD2XDUsZRQtfkTrd4mAAD9EX0D8P1GC0JbJ3OSRKL9
+qRMVaXVyR+MGiY4fq9umUAm4OARpqByGEgorBgEEAZdVAQUBAQdAV7XUsnWCFefO
+rZMjcAHn750DNKSWqZJVG1Q/X/QJkBwDAQgHiH4EGBYKACYWIQR1UMNsPfYWpp8e
+/gBgRt3vlM+ZtQUCaagchgIbDAUJA8JnAAAKCRBgRt3vlM+ZteKxAP9Mf9lzcCne
+G7gptbThqUzGi0EaFoaLOi/9MFfSxMRChgEAtVpsm/bpf9kDYv//LCjQ32mG594e
+jlOOQUwFoIKfgAk=
+=K4Oq
 -----END PGP PUBLIC KEY BLOCK-----
 ```
 
+### Advisories, CVEs, and Credit
+
+We publish a GitHub Security Advisory (GHSA), and request a CVE where
+appropriate, for vulnerabilities that affect a tagged Zebra release, including
+release candidates and other pre-release tags. Advisories exist to tell
+operators whether they are exposed and which version fixes the issue, so they
+are scoped to code that has actually been shipped.
+
+Vulnerabilities that exist only in unreleased code (the `main` branch or an
+unmerged pull request) and are fixed before appearing in any tagged release do
+not receive an advisory or CVE. This matches the practice of the CVE program
+and of most major open source projects, and avoids generating alerts for
+downstream users who were never affected. Such findings are fixed as ordinary
+public issues once a fix is ready, and we credit the reporter in the issue, the
+fixing pull request, and the release notes of the next release, unless they ask
+not to be named.
+
+If an unreleased vulnerability is later found to have shipped in a tagged
+release before the fix landed, we will publish an advisory for it at that
+point.
+
+We do not currently operate a bug bounty program and do not pay for reports.
+
 ## Sending Disclosures
 
-In the case where we become aware of security issues affecting other projects that has never affected Zebra or Zcash, our intention is to inform those projects of security issues on a best effort basis.
+In the case where we become aware of security issues affecting other projects that have never affected Zebra or Zcash, our intention is to inform those projects of security issues on a best effort basis.
 
 In the case where we fix a security issue in Zebra or Zcash that also affects the following neighboring projects, our intention is to engage in responsible disclosures with them as described in <https://github.com/RD-Crypto-Spec/Responsible-Disclosure>, subject to the deviations described in the section at the bottom of this document.
 
@@ -60,9 +116,10 @@ In the case where we fix a security issue in Zebra or Zcash that also affects th
 
 We have set up agreements with the following neighboring projects to share vulnerability information, subject to the deviations described in the next section.
 
-Specifically, we have agreed to engage in responsible disclosures for security issues affecting Zebra or Zcash technology with the following contacts:
+Specifically, we have agreed to engage in responsible disclosures for security issues affecting Zebra or Zcash technology with the following teams:
 
-- The Electric Coin Company - <security@z.cash> via PGP
+- Zcash Open Development Lab (ZODL), which maintains the `zcash/zcash` core node, `librustzcash`, `zallet`, and related software, via its security disclosure process at <https://github.com/zcash/.github/blob/main/SECURITY.md>
+- Shielded Labs, which maintains the Crosslink proof-of-stake and Network Sustainability Mechanism work and its associated Zebra and `librustzcash` forks.
 
 ## Deviations from the Standard
 

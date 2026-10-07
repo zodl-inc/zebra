@@ -1,9 +1,67 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and this project adheres to [Semantic Versioning](https://semver.org).
+
+## [12.0.0] - 2026-10-01
+
+### Breaking Changes
+
+- Updated to `zebra-chain` 14.0.0, whose types appear in the re-exported `constants` module and in the mempool request and response types, so dependents must upgrade `zebra-chain` as well.
+
+## [11.0.0] - 2026-09-23
+
+### Changed
+
+- Updated the following local packages: zebra-chain
+
+## [10.0.0] - 2026-08-10
+
+### Breaking Changes
+
+- Requires `zebra-chain` 12.0.0, whose transaction types and checkpoint constants appear in this
+  crate's public API.
+
+### Changed
+
+- Updated the following local packages: zebra-chain
+
+## [9.1.2] - 2026-07-27
+
+### Changed
+
+- `zebra-chain` dependency bumped to `11.3.0`.
+
+## [9.1.1] - 2026-07-17
+
+### Changed
+
+- `zebra-chain` dependency bumped to `11.2.0`.
+
+## [9.1.0] - 2026-07-10
+
+### Added
+
+- `RpcRequestClient::new_with_timeout()` for constructing a client with a custom
+  request timeout ([#10468](https://github.com/ZcashFoundation/zebra/pull/10468)).
+
+### Changed
+
+- MSRV is now 1.88
+- `RpcRequestClient::new()` now applies a default 180-second request timeout, so RPC
+  calls fail instead of hanging when a server accepts the connection but never responds.
+
+## [9.0.0] - 2026-07-02
+
+### Breaking Changes
+
+- `mempool::Request::QueueFromPeer` now carries `candidates: Vec<Gossip>` instead of
+  `txids: HashSet<UnminedTxId>`, so directly pushed transactions (`Tx` messages) are
+  attributed to the sending peer and routed through the same per-peer admission
+  accounting as advertised transaction IDs
+  ([GHSA-m9xx-8rcj-vmgp](https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-m9xx-8rcj-vmgp)).
 
 ## [8.0.0] - 2026-06-10
 

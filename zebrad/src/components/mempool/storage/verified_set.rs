@@ -8,7 +8,7 @@ use std::{
 
 use zebra_chain::{
     block::Height,
-    orchard, sapling, sprout,
+    ironwood, orchard, sapling, sprout,
     transaction::{self, UnminedTx, UnminedTxId, VerifiedUnminedTx},
     transparent,
 };
@@ -33,6 +33,7 @@ use zebra_chain::transaction::MEMPOOL_TRANSACTION_COST_THRESHOLD;
 /// - the Sprout nullifiers revealed by transactions in the mempool
 /// - the Sapling nullifiers revealed by transactions in the mempool
 /// - the Orchard nullifiers revealed by transactions in the mempool
+/// - the Ironwood nullifiers revealed by transactions in the mempool
 #[derive(Default)]
 pub struct VerifiedSet {
     /// The set of verified transactions in the mempool.
@@ -65,6 +66,9 @@ pub struct VerifiedSet {
 
     /// The set of revealed Orchard nullifiers.
     orchard_nullifiers: HashSet<orchard::Nullifier>,
+
+    /// The set of revealed Ironwood nullifiers.
+    ironwood_nullifiers: HashSet<ironwood::Nullifier>,
 }
 
 impl Drop for VerifiedSet {
@@ -132,6 +136,7 @@ impl VerifiedSet {
         self.sprout_nullifiers.clear();
         self.sapling_nullifiers.clear();
         self.orchard_nullifiers.clear();
+        self.ironwood_nullifiers.clear();
         self.created_outputs.clear();
         self.transactions_serialized_size = 0;
         self.total_cost = 0;
@@ -176,10 +181,12 @@ impl VerifiedSet {
             self.created_outputs.insert(outpoint, output.clone());
             pending_outputs.respond(&outpoint, output)
         }
+
         self.spent_outpoints.extend(tx.spent_outpoints());
         self.sprout_nullifiers.extend(tx.sprout_nullifiers());
         self.sapling_nullifiers.extend(tx.sapling_nullifiers());
         self.orchard_nullifiers.extend(tx.orchard_nullifiers());
+        self.ironwood_nullifiers.extend(tx.ironwood_nullifiers());
 
         self.transactions_serialized_size += transaction.transaction.size;
         self.total_cost += transaction.cost();
@@ -216,8 +223,7 @@ impl VerifiedSet {
     /// [ZIP-401]: https://zips.z.cash/zip-0401
     #[allow(clippy::unwrap_in_result)]
     pub fn evict_one(&mut self) -> Option<VerifiedUnminedTx> {
-        use rand::distributions::{Distribution, WeightedIndex};
-        use rand::prelude::thread_rng;
+        use rand::distr::{weighted::WeightedIndex, Distribution};
 
         let (keys, weights): (Vec<transaction::Hash>, Vec<u64>) = self
             .transactions
@@ -230,7 +236,7 @@ impl VerifiedSet {
         );
 
         let key_to_remove = keys
-            .get(dist.sample(&mut thread_rng()))
+            .get(dist.sample(&mut rand::rng()))
             .expect("should have a key at every index in the distribution");
 
         // Removes the randomly selected transaction and all of its dependents from the set,
@@ -318,9 +324,10 @@ impl VerifiedSet {
         let tx = &unmined_tx.transaction;
 
         Self::has_conflicts(&self.spent_outpoints, tx.spent_outpoints())
-            || Self::has_conflicts(&self.sprout_nullifiers, tx.sprout_nullifiers().copied())
-            || Self::has_conflicts(&self.sapling_nullifiers, tx.sapling_nullifiers().copied())
-            || Self::has_conflicts(&self.orchard_nullifiers, tx.orchard_nullifiers().copied())
+            || Self::has_conflicts(&self.sprout_nullifiers, tx.sprout_nullifiers())
+            || Self::has_conflicts(&self.sapling_nullifiers, tx.sapling_nullifiers())
+            || Self::has_conflicts(&self.orchard_nullifiers, tx.orchard_nullifiers())
+            || Self::has_conflicts(&self.ironwood_nullifiers, tx.ironwood_nullifiers())
     }
 
     /// Removes the tracked transaction outputs from the mempool.
@@ -336,14 +343,31 @@ impl VerifiedSet {
         }
 
         let spent_outpoints = tx.spent_outpoints().map(Cow::Owned);
-        let sprout_nullifiers = tx.sprout_nullifiers().map(Cow::Borrowed);
-        let sapling_nullifiers = tx.sapling_nullifiers().map(Cow::Borrowed);
-        let orchard_nullifiers = tx.orchard_nullifiers().map(Cow::Borrowed);
+
+        // All the nullifier accessors yield owned nullifiers, so they are wrapped as `Cow::Owned`.
+        // They are collected first so `tx` is no longer borrowed while `self` is mutated.
+        let sprout_nfs: Vec<_> = tx.sprout_nullifiers().collect();
+        let sapling_nfs: Vec<_> = tx.sapling_nullifiers().collect();
+        let orchard_nfs: Vec<_> = tx.orchard_nullifiers().collect();
+        let ironwood_nfs: Vec<_> = tx.ironwood_nullifiers().collect();
 
         Self::remove_from_set(&mut self.spent_outpoints, spent_outpoints);
-        Self::remove_from_set(&mut self.sprout_nullifiers, sprout_nullifiers);
-        Self::remove_from_set(&mut self.sapling_nullifiers, sapling_nullifiers);
-        Self::remove_from_set(&mut self.orchard_nullifiers, orchard_nullifiers);
+        Self::remove_from_set(
+            &mut self.sprout_nullifiers,
+            sprout_nfs.into_iter().map(Cow::Owned),
+        );
+        Self::remove_from_set(
+            &mut self.sapling_nullifiers,
+            sapling_nfs.into_iter().map(Cow::Owned),
+        );
+        Self::remove_from_set(
+            &mut self.orchard_nullifiers,
+            orchard_nfs.into_iter().map(Cow::Owned),
+        );
+        Self::remove_from_set(
+            &mut self.ironwood_nullifiers,
+            ironwood_nfs.into_iter().map(Cow::Owned),
+        );
     }
 
     /// Returns `true` if the two sets have common items.

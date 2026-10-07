@@ -8,27 +8,23 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rand::{
-    distributions::{Distribution, WeightedIndex},
-    prelude::thread_rng,
-};
+use rand::distr::{weighted::WeightedIndex, Distribution};
 
 use zebra_chain::{
-    amount::Amount,
-    block::{Height, MAX_BLOCK_BYTES},
-    parameters::Network,
-    transaction::{self, zip317::BLOCK_UNPAID_ACTION_LIMIT, VerifiedUnminedTx},
+    amount::{Amount, NonNegative},
+    block::{Header, Height, MAX_BLOCK_BYTES},
+    parameters::{Network, NetworkUpgrade},
+    serialization::{CompactSizeMessage, ZcashDeserializeInto, ZcashSerialize},
+    transaction::{
+        self, zip317::BLOCK_UNPAID_ACTION_LIMIT, Transaction, VerifiedUnminedTx,
+        MIN_TRANSPARENT_TX_SIZE,
+    },
 };
-use zebra_consensus::MAX_BLOCK_SIGOPS;
+use zebra_consensus::{ShieldedActionCounts, MAX_BLOCK_SIGOPS};
 use zebra_node_services::mempool::TransactionDependencies;
 
+use super::CoinbaseCache;
 use crate::methods::types::transaction::TransactionTemplate;
-
-#[cfg(all(zcash_unstable = "nu7", feature = "tx_v6"))]
-use crate::methods::Amount;
-
-#[cfg(all(zcash_unstable = "nu7", feature = "tx_v6"))]
-use zebra_chain::amount::NonNegative;
 
 #[cfg(test)]
 mod tests;
@@ -49,9 +45,9 @@ type SelectedMempoolTx = VerifiedUnminedTx;
 /// Selects mempool transactions for block production according to [ZIP-317],
 /// using a fake coinbase transaction and the mempool.
 ///
-/// The fake coinbase transaction's serialized size and sigops must be at least as large
-/// as the real coinbase transaction. (The real coinbase transaction depends on the total
-/// fees from the transactions returned by this function.)
+/// The sizing coinbase must have at least the bytes, sigops, and shielded components of the
+/// fee-bearing coinbase. Both use the same subsidy and miner parameters; changing only the
+/// reward amount does not change these costs.
 ///
 /// Returns selected transactions from `mempool_txs`.
 ///
@@ -63,21 +59,36 @@ pub fn select_mempool_transactions(
     miner_params: &MinerParams,
     mempool_txs: Vec<VerifiedUnminedTx>,
     mempool_tx_deps: TransactionDependencies,
-    #[cfg(all(zcash_unstable = "nu7", feature = "tx_v6"))] zip233_amount: Option<
-        Amount<NonNegative>,
-    >,
+    coinbase_cache: Option<&CoinbaseCache>,
+    parent_nsm_value_balance: Option<Amount<NonNegative>>,
 ) -> Vec<SelectedMempoolTx> {
+    if let Some(cache) = coinbase_cache {
+        cache.select(height, parent_nsm_value_balance);
+    }
+
     // Use a fake coinbase transaction to break the dependency between transaction
     // selection, the miner fee, and the fee payment in the coinbase transaction.
-    let fake_coinbase_tx = TransactionTemplate::new_coinbase(
-        net,
-        height,
-        miner_params,
-        Amount::zero(),
-        #[cfg(all(zcash_unstable = "nu7", feature = "tx_v6"))]
-        zip233_amount,
-    )
-    .expect("valid coinbase transaction template");
+    //
+    // The fake coinbase only depends on the height, miner parameters, and parent NSM value
+    // balance (its fee is always zero), so it's constant per block. Reuse the same per-block cache
+    // as the real coinbase to avoid re-proving a shielded coinbase on every `getblocktemplate`
+    // call just to read its size.
+    let fake_coinbase_tx = coinbase_cache
+        .and_then(|cache| cache.get(height, Amount::zero(), parent_nsm_value_balance))
+        .unwrap_or_else(|| {
+            let cb = TransactionTemplate::new_coinbase_with_parent_pools(
+                net,
+                height,
+                miner_params,
+                Amount::zero(),
+                parent_nsm_value_balance,
+            )
+            .expect("valid coinbase transaction template");
+            if let Some(cache) = coinbase_cache {
+                cache.store(height, Amount::zero(), parent_nsm_value_balance, cb.clone());
+            }
+            cb
+        });
 
     let tx_dependencies = mempool_tx_deps.dependencies();
     let (independent_mempool_txs, mut dependent_mempool_txs): (HashMap<_, _>, HashMap<_, _>) =
@@ -97,10 +108,33 @@ pub fn select_mempool_transactions(
     let mut remaining_block_bytes: usize = MAX_BLOCK_BYTES.try_into().expect("fits in memory");
     let mut remaining_block_sigops = MAX_BLOCK_SIGOPS;
     let mut remaining_block_unpaid_actions: u32 = BLOCK_UNPAID_ACTION_LIMIT;
+    let mut remaining_shielded = ShieldedBudget::new(net, height);
 
-    // Adjust the limits based on the coinbase transaction
-    remaining_block_bytes -= fake_coinbase_tx.data.as_ref().len();
-    remaining_block_sigops -= fake_coinbase_tx.sigops;
+    // `MAX_BLOCK_BYTES` limits the whole serialized block, so reserve space for the block header
+    // and the transaction count before budgeting transactions, or the assembled block could
+    // exceed the consensus size limit (GHSA-95m2-vx53-v2jw).
+    remaining_block_bytes -= Header::serialized_size(net);
+    remaining_block_bytes -= max_transaction_count_size();
+
+    // Reserve every coinbase cost before selecting candidates. Checked subtraction also handles
+    // a coinbase that exhausts the byte or sigop budget without wrapping.
+    let Some(block_bytes) = remaining_block_bytes.checked_sub(fake_coinbase_tx.data.as_ref().len())
+    else {
+        return selected_txs;
+    };
+    let Some(block_sigops) = remaining_block_sigops.checked_sub(fake_coinbase_tx.sigops) else {
+        return selected_txs;
+    };
+    let coinbase: Transaction = fake_coinbase_tx
+        .data
+        .as_ref()
+        .zcash_deserialize_into()
+        .expect("locally constructed coinbase must deserialize");
+    if !remaining_shielded.try_add(&coinbase) {
+        return selected_txs;
+    }
+    remaining_block_bytes = block_bytes;
+    remaining_block_sigops = block_sigops;
 
     // > Repeat while there is any candidate transaction
     // > that pays at least the conventional fee:
@@ -118,6 +152,7 @@ pub fn select_mempool_transactions(
             // The number of unpaid actions is always zero for transactions that pay the
             // conventional fee, so this check and limit is effectively ignored.
             &mut remaining_block_unpaid_actions,
+            &mut remaining_shielded,
         );
     }
 
@@ -134,10 +169,30 @@ pub fn select_mempool_transactions(
             &mut remaining_block_bytes,
             &mut remaining_block_sigops,
             &mut remaining_block_unpaid_actions,
+            &mut remaining_shielded,
         );
     }
 
     selected_txs
+}
+
+/// Returns the maximum possible serialized size of a block's transaction count, in bytes.
+///
+/// The transaction count is a CompactSize whose width grows with the count. A serialized
+/// transaction takes at least [`MIN_TRANSPARENT_TX_SIZE`] bytes, so a block can never contain
+/// more than `MAX_BLOCK_BYTES / MIN_TRANSPARENT_TX_SIZE` transactions, which bounds the width.
+fn max_transaction_count_size() -> usize {
+    let max_transaction_count: usize = (MAX_BLOCK_BYTES / MIN_TRANSPARENT_TX_SIZE)
+        .try_into()
+        .expect("fits in memory");
+
+    let max_transaction_count = CompactSizeMessage::try_from(max_transaction_count)
+        .expect("the maximum transaction count is below the CompactSize message limit");
+
+    max_transaction_count
+        .zcash_serialize_to_vec()
+        .expect("serialization into a vec can't fail")
+        .len()
 }
 
 /// Returns a fee-weighted index and the total weight of `transactions`.
@@ -228,6 +283,7 @@ fn checked_add_transaction_weighted_random(
     remaining_block_bytes: &mut usize,
     remaining_block_sigops: &mut u32,
     remaining_block_unpaid_actions: &mut u32,
+    remaining_shielded: &mut ShieldedBudget,
 ) -> Option<WeightedIndex<f32>> {
     // > Pick one of those transactions at random with probability in direct proportion
     // > to its weight_ratio, and remove it from the set of candidate transactions
@@ -238,6 +294,7 @@ fn checked_add_transaction_weighted_random(
         remaining_block_bytes,
         remaining_block_sigops,
         remaining_block_unpaid_actions,
+        remaining_shielded,
     ) {
         return new_tx_weights;
     }
@@ -283,6 +340,7 @@ fn checked_add_transaction_weighted_random(
                     remaining_block_bytes,
                     remaining_block_sigops,
                     remaining_block_unpaid_actions,
+                    remaining_shielded,
                 ) {
                     continue;
                 }
@@ -306,6 +364,52 @@ fn checked_add_transaction_weighted_random(
     new_tx_weights
 }
 
+/// Tracks a block template's [ZIP 218] shielded action budget.
+///
+/// The limits only apply from NU7, so before then `applies` is false and every transaction fits.
+///
+/// Template selection has to apply the same limits as the block verifier: without this, a mempool
+/// holding more than a block's worth of shielded actions would produce a template that
+/// `check::shielded_action_limits_are_valid()` rejects, so a Zebra-backed miner would mine invalid
+/// blocks and a `getblocktemplate` proposal round-trip would fail.
+///
+/// [ZIP 218]: https://zips.z.cash/zip-0218
+struct ShieldedBudget {
+    /// Whether the ZIP 218 limits apply at this block's height.
+    applies: bool,
+    /// The shielded actions already committed to the template.
+    used: ShieldedActionCounts,
+}
+
+impl ShieldedBudget {
+    /// Returns the budget for a block at `height` on `net`.
+    fn new(net: &Network, height: Height) -> Self {
+        Self {
+            applies: NetworkUpgrade::current(net, height) >= NetworkUpgrade::Nu7,
+            used: ShieldedActionCounts::default(),
+        }
+    }
+
+    /// Adds `transaction` to the budget and returns `true`, or returns `false` and leaves the
+    /// budget unchanged if it would exceed a limit.
+    fn try_add(&mut self, transaction: &Transaction) -> bool {
+        if !self.applies {
+            return true;
+        }
+
+        let used = self
+            .used
+            .saturating_add(ShieldedActionCounts::from_transaction(transaction));
+
+        if used.exceeded_limit().is_some() {
+            return false;
+        }
+
+        self.used = used;
+        true
+    }
+}
+
 trait TryUpdateBlockLimits {
     /// Checks if a transaction fits within the provided remaining block bytes,
     /// sigops, and unpaid actions limits.
@@ -317,6 +421,7 @@ trait TryUpdateBlockLimits {
         remaining_block_bytes: &mut usize,
         remaining_block_sigops: &mut u32,
         remaining_block_unpaid_actions: &mut u32,
+        remaining_shielded: &mut ShieldedBudget,
     ) -> bool;
 }
 
@@ -326,6 +431,7 @@ impl TryUpdateBlockLimits for VerifiedUnminedTx {
         remaining_block_bytes: &mut usize,
         remaining_block_sigops: &mut u32,
         remaining_block_unpaid_actions: &mut u32,
+        remaining_shielded: &mut ShieldedBudget,
     ) -> bool {
         // > If the block template with this transaction included
         // > would be within the block size limit and block sigop limit,
@@ -340,6 +446,9 @@ impl TryUpdateBlockLimits for VerifiedUnminedTx {
         if self.transaction.size <= *remaining_block_bytes
             && tx_block_sigops <= *remaining_block_sigops
             && self.unpaid_actions <= *remaining_block_unpaid_actions
+            // Checked last, and only committed once the other limits pass, so the shielded
+            // budget is not consumed by a transaction that is then rejected for its size.
+            && remaining_shielded.try_add(&self.transaction.transaction)
         {
             *remaining_block_bytes -= self.transaction.size;
             *remaining_block_sigops -= tx_block_sigops;
@@ -363,7 +472,7 @@ fn choose_transaction_weighted_random(
     candidate_txs: &mut Vec<VerifiedUnminedTx>,
     weighted_index: WeightedIndex<f32>,
 ) -> (Option<WeightedIndex<f32>>, VerifiedUnminedTx) {
-    let candidate_position = weighted_index.sample(&mut thread_rng());
+    let candidate_position = weighted_index.sample(&mut rand::rng());
     let candidate_tx = candidate_txs.swap_remove(candidate_position);
 
     // We have to regenerate this index each time we choose a transaction, due to floating-point sum inaccuracies.

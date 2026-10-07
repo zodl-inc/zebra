@@ -1,12 +1,16 @@
 use std::{
-    collections::HashSet, env, fs, io::Write as _, path::PathBuf, sync::Mutex, time::Duration,
+    collections::HashSet,
+    env, fs,
+    io::Write as _,
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::{Duration, Instant},
 };
 
 use color_eyre::eyre::{eyre, Result, WrapErr};
 use tempfile::{Builder, TempDir};
 
 use zebra_chain::parameters::Network::*;
-#[cfg(not(target_os = "windows"))]
 use zebra_state;
 use zebra_test::{args, command::to_regex::CollectRegexSet, prelude::*};
 use zebrad::config::ZebradConfig;
@@ -14,56 +18,13 @@ use zebrad::config::ZebradConfig;
 use crate::common::{
     check::{EphemeralCheck, EphemeralConfig},
     config::{
-        config_file_full_path, configs_dir, default_test_config, persistent_test_config, testdir,
+        config_file_full_path, configs_dir, default_test_config, persistent_test_config,
+        random_known_rpc_port_config, read_listen_addr_from_logs, testdir,
     },
     launch::{ZebradTestDirExt, EXTENDED_LAUNCH_DELAY, LAUNCH_DELAY},
-};
-
-// Used by `non_blocking_logger` test, which is disabled on macOS.
-#[cfg(not(target_os = "macos"))]
-use crate::common::{
-    config::{os_assigned_rpc_port_config, read_listen_addr_from_logs},
     sync::TINY_CHECKPOINT_TIMEOUT,
 };
-#[cfg(not(target_os = "macos"))]
 use zebra_node_services::rpc_client::RpcRequestClient;
-#[cfg(not(target_os = "macos"))]
-use zebra_rpc::server::OPENED_RPC_ENDPOINT_MSG;
-
-/// Check that the block state and peer list caches are written to disk.
-#[test]
-fn persistent_mode() -> Result<()> {
-    let _init_guard = zebra_test::init();
-
-    let testdir = testdir()?.with_config(&mut persistent_test_config(&Mainnet)?)?;
-    let testdir = &testdir;
-
-    let mut child = testdir.spawn_child(args!["-v", "start"])?;
-
-    // Run the program and kill it after a few seconds
-    std::thread::sleep(EXTENDED_LAUNCH_DELAY);
-    child.kill(false)?;
-    let output = child.wait_with_output()?;
-
-    // Make sure the command was killed
-    output.assert_was_killed()?;
-
-    let cache_dir = testdir.path().join("state");
-    assert_with_context!(
-        cache_dir.read_dir()?.count() > 0,
-        &output,
-        "state directory empty despite persistent state config"
-    );
-
-    let cache_dir = testdir.path().join("network");
-    assert_with_context!(
-        cache_dir.read_dir()?.count() > 0,
-        &output,
-        "network directory empty despite persistent network config"
-    );
-
-    Ok(())
-}
 
 #[test]
 fn ephemeral_existing_directory() -> Result<()> {
@@ -199,6 +160,138 @@ fn ephemeral(cache_dir_config: EphemeralConfig, cache_dir_check: EphemeralCheck)
     Ok(())
 }
 
+/// The message `zebra-network` logs after binding its Zcash protocol listener.
+///
+/// The listen address follows this message, so the tests below can read an OS-assigned port
+/// out of the logs instead of guessing a free port.
+const OPENED_P2P_ENDPOINT_MSG: &str = "Opened Zcash protocol endpoint at";
+
+/// The maximum time to wait for the peer cache to be created on disk.
+///
+/// The peer cache updater waits before its first write, then retries every 20 seconds until it
+/// has cacheable peers, so this needs to cover several attempts on a loaded machine.
+const PEER_CACHE_CREATION_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Check that a persistent state config writes the state cache to disk.
+///
+/// The state cache is created when the database is opened, so this node runs with no initial
+/// peers at all.
+#[test]
+fn persistent_mode_state_cache() -> Result<()> {
+    let _init_guard = zebra_test::init();
+
+    let mut config = persistent_test_config(&Mainnet)?;
+
+    let testdir = testdir()?.with_config(&mut config)?;
+    let testdir = &testdir;
+    let state_dir = testdir.path().join("state");
+
+    let mut child = testdir.spawn_child(args!["-v", "start"])?;
+
+    // The state cache is created while the node starts up, so it only needs the launch delay.
+    let created = wait_for(LAUNCH_DELAY, || dir_is_populated(&state_dir));
+
+    // Kill the node and make sure it was killed
+    child.kill(false)?;
+    let output = child.wait_with_output()?;
+    output.assert_was_killed()?;
+
+    assert_with_context!(
+        created,
+        &output,
+        "state directory missing or empty despite persistent state config"
+    );
+
+    Ok(())
+}
+
+/// Check that a persistent network config writes the peer cache to disk.
+///
+/// The peer cache is only written for peers that have responded, so this test starts a second
+/// local `zebrad` and uses it as the node's only initial peer. Using live Mainnet peers made this
+/// test flaky: a node that fails every initial handshake never gets a cacheable peer, and remote
+/// Zebra peers drop repeat connections from the same IP for `MIN_PEER_RECONNECTION_DELAY`
+/// (#11072, #11098).
+#[test]
+fn persistent_mode_peer_cache() -> Result<()> {
+    let _init_guard = zebra_test::init();
+
+    // The peer node only accepts connections. `default_test_config()` has no initial peers,
+    // and listens on an OS-assigned port on IPv4 localhost.
+    let mut peer_config = default_test_config(&Mainnet);
+
+    let mut peer = testdir()?
+        .with_config(&mut peer_config)?
+        .spawn_child(args!["start"])?
+        .with_timeout(LAUNCH_DELAY);
+
+    let peer_addr = read_listen_addr_from_logs(&mut peer, OPENED_P2P_ENDPOINT_MSG)?;
+
+    // The node under test connects to the peer node, and to nothing else.
+    let mut config = persistent_test_config(&Mainnet)?;
+    config.network.initial_mainnet_peers = [peer_addr.to_string()].into();
+    config.network.peerset_initial_target_size = 1;
+
+    let testdir = testdir()?.with_config(&mut config)?;
+    let testdir = &testdir;
+    let peer_cache_file = testdir.path().join("network").join("mainnet.peers");
+
+    let mut child = testdir.spawn_child(args!["-v", "start"])?;
+
+    let created = wait_for(PEER_CACHE_CREATION_TIMEOUT, || peer_cache_file.exists());
+
+    // Kill the node under test and make sure it was killed
+    child.kill(false)?;
+    let output = child.wait_with_output()?;
+    output.assert_was_killed()?;
+
+    assert_with_context!(
+        created,
+        &output,
+        "peer cache file missing despite persistent network config and a local peer at {peer_addr}"
+    );
+
+    let cached_peers = fs::read_to_string(&peer_cache_file)?;
+    assert_with_context!(
+        cached_peers.contains(&peer_addr.to_string()),
+        &output,
+        "peer cache does not contain the local peer {peer_addr}: {cached_peers:?}"
+    );
+
+    // Shut down the peer node
+    peer.kill(false)?;
+    peer.wait_with_output()?.assert_was_killed()?;
+
+    Ok(())
+}
+
+/// Waits up to `timeout` for `condition` to return `true`.
+///
+/// Returns `true` if it did, and `false` if the timeout elapsed first.
+fn wait_for(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if condition() {
+            return true;
+        }
+
+        if Instant::now() >= deadline {
+            return false;
+        }
+
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Returns `true` if `dir` exists and contains at least one entry.
+fn dir_is_populated(dir: &Path) -> bool {
+    matches!(
+        dir.read_dir().map(|mut entries| entries.next().is_some()),
+        Ok(true)
+    )
+}
+
 /// Run config tests that use the default ports and paths.
 ///
 /// Unlike the other tests, these tests can not be run in parallel, because
@@ -212,7 +305,6 @@ fn config_tests() -> Result<()> {
     invalid_generated_config()?;
 
     // Check that we have a current version of the config stored
-    #[cfg(not(target_os = "windows"))]
     last_config_is_stored()?;
 
     // Check that Zebra's previous configurations still work
@@ -311,7 +403,6 @@ fn valid_generated_config(command: &str, expect_stdout_line_contains: &str) -> R
 }
 
 /// Check if the config produced by current zebrad is stored.
-#[cfg(not(target_os = "windows"))]
 #[tracing::instrument]
 #[allow(clippy::print_stdout)]
 fn last_config_is_stored() -> Result<()> {
@@ -501,7 +592,7 @@ fn invalid_generated_config() -> Result<()> {
     Ok(())
 }
 
-/// Test all versions of `zebrad.toml` we have stored can be parsed by the latest `zebrad`.
+/// Check stored config syntax, including the semantic rejection of historical overlapping ranges.
 #[tracing::instrument]
 #[test]
 fn stored_configs_parsed_correctly() -> Result<()> {
@@ -537,15 +628,25 @@ fn stored_configs_parsed_correctly() -> Result<()> {
             "testing old config can be parsed by current zebrad"
         );
 
-        ZebradApp::default()
-            .load_config(&config_file_path)
-            .expect("config should parse");
+        if config_file_name == "v2.5.0-funding-streams.toml" {
+            let source = fs::read_to_string(&config_file_path)?;
+            // The original TOML remains valid syntax, but its inherited and explicit streams overlap.
+            toml::from_str::<toml::Value>(&source)?;
+            let error = toml::from_str::<ZebradConfig>(&source)
+                .expect_err("overlapping historical funding ranges must be rejected");
+            // Serde flattens ParametersBuilderError into a message, so check the error category.
+            assert!(error.message().contains("overlap"), "{error}");
+        } else {
+            ZebradApp::default()
+                .load_config(&config_file_path)
+                .expect("config should parse");
+        }
     }
 
     Ok(())
 }
 
-/// Test all versions of `zebrad.toml` we have stored can be parsed by the latest `zebrad`.
+/// Test stored configurations start successfully or reject known invalid consensus parameters.
 #[tracing::instrument]
 fn stored_configs_work() -> Result<()> {
     let old_configs_dir = configs_dir();
@@ -584,6 +685,12 @@ fn stored_configs_work() -> Result<()> {
         // run zebra with stored config
         let mut child =
             run_dir.spawn_child(args!["-c", stored_config_path.to_str().unwrap(), "start"])?;
+
+        if config_file_name == "v2.5.0-funding-streams.toml" {
+            let output = child.wait_with_output()?.assert_failure()?;
+            output.stderr_contains("overlap")?;
+            continue;
+        }
 
         let success_regexes = [
             // When logs are sent to the terminal, we see the config loading message and path.
@@ -626,55 +733,94 @@ fn stored_configs_work() -> Result<()> {
 
 /// Test that Zebra's non-blocking logger works, by creating lots of debug output, but not reading the logs.
 /// Then make sure Zebra drops excess log lines. (Previously, it would block waiting for logs to be read.)
-///
-/// This test is unreliable and sometimes hangs on macOS.
 #[test]
-#[cfg(not(target_os = "macos"))]
 fn non_blocking_logger() -> Result<()> {
     use futures::FutureExt;
     use std::{sync::mpsc, time::Duration};
+
+    /// How long to wait for zebrad to start listening on its RPC port.
+    const RPC_SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
+
+    /// How long to wait between attempts to reach the RPC server while it is starting up.
+    const RPC_SERVER_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+    /// How long to wait for a single RPC response.
+    ///
+    /// Shorter than the 90 second task timeout below, so a logger that blocks zebrad is reported
+    /// as an unanswered RPC request, rather than as a hung test task.
+    const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (done_tx, done_rx) = mpsc::channel();
 
     let test_task_handle: tokio::task::JoinHandle<Result<()>> = rt.spawn(async move {
-        let mut config = os_assigned_rpc_port_config(false, &Mainnet)?;
-        config.tracing.filter = Some("trace".to_string());
-        config.tracing.buffer_limit = 100;
+        let result: Result<()> = async {
+            // This test configures zebrad to drop log lines, so it can't learn an OS-assigned port
+            // by reading the logs: the line reporting that port is dropped like any other line.
+            // [Note on port conflict](#Note on port conflict)
+            let mut config = random_known_rpc_port_config(false, &Mainnet)?;
+            config.tracing.filter = Some("trace".to_string());
+            config.tracing.buffer_limit = 100;
 
-        let dir = testdir()?.with_config(&mut config)?;
-        let mut child = dir
-            .spawn_child(args!["start"])?
-            .with_timeout(TINY_CHECKPOINT_TIMEOUT);
+            let rpc_address = config
+                .rpc
+                .listen_addr
+                .expect("config was just created with a known RPC port");
 
-        // Wait until port is open.
-        let rpc_address = read_listen_addr_from_logs(&mut child, OPENED_RPC_ENDPOINT_MSG)?;
+            let dir = testdir()?.with_config(&mut config)?;
+            let mut child = dir
+                .spawn_child(args!["start"])?
+                .with_timeout(TINY_CHECKPOINT_TIMEOUT);
 
-        // Create an http client
-        let client = RpcRequestClient::new(rpc_address);
+            // Create an http client
+            let client = RpcRequestClient::new_with_timeout(rpc_address, RPC_REQUEST_TIMEOUT);
 
-        // Most of Zebra's lines are 100-200 characters long, so 500 requests should print enough to fill the unix pipe,
-        // fill the channel that tracing logs are queued onto, and drop logs rather than block execution.
-        for _ in 0..500 {
-            let res = client.call("getinfo", "[]".to_string()).await?;
+            // Wait until the RPC port is open, without reading the logs.
+            let deadline = Instant::now() + RPC_SERVER_STARTUP_TIMEOUT;
+            while client.call("getinfo", "[]".to_string()).await.is_err() {
+                if !child.is_running() {
+                    return Err(eyre!("zebrad exited before opening its RPC port"));
+                }
 
-            // Test that zebrad rpc endpoint is still responding to requests
-            assert!(res.status().is_success());
+                if Instant::now() >= deadline {
+                    return Err(eyre!(
+                        "timed out after {RPC_SERVER_STARTUP_TIMEOUT:?} waiting for zebrad to open \
+                         its RPC port at {rpc_address}. \
+                         Possible port conflict. Are there other zebrad tests running?"
+                    ));
+                }
+
+                tokio::time::sleep(RPC_SERVER_RETRY_INTERVAL).await;
+            }
+
+            // Most of Zebra's lines are 100-200 characters long, so 500 requests should print enough to fill the unix pipe,
+            // fill the channel that tracing logs are queued onto, and drop logs rather than block execution.
+            for _ in 0..500 {
+                let res = client.call("getinfo", "[]".to_string()).await?;
+
+                // Test that zebrad rpc endpoint is still responding to requests
+                assert!(res.status().is_success());
+            }
+
+            child.kill(false)?;
+
+            let output = child.wait_with_output()?;
+            let output = output.assert_failure()?;
+
+            // [Note on port conflict](#Note on port conflict)
+            output
+                .assert_was_killed()
+                .wrap_err("Possible port conflict. Are there other zebrad tests running?")?;
+
+            Ok(())
         }
+        .await;
 
-        child.kill(false)?;
+        // Report that the task has finished whether it passed or failed, so a failure is returned
+        // below instead of waiting out the timeout.
+        let _ = done_tx.send(());
 
-        let output = child.wait_with_output()?;
-        let output = output.assert_failure()?;
-
-        // [Note on port conflict](#Note on port conflict)
-        output
-            .assert_was_killed()
-            .wrap_err("Possible port conflict. Are there other zebrad tests running?")?;
-
-        done_tx.send(())?;
-
-        Ok(())
+        result
     });
 
     // Wait until the spawned task finishes up to 90 seconds before shutting down tokio runtime.
@@ -865,6 +1011,28 @@ network = "Testnet"
     fs::write(&config_path, invalid_config).expect("write invalid config");
 
     ZebradConfig::load(Some(config_path)).expect_err("Should fail to load invalid TOML");
+}
+
+#[test]
+fn config_oversized_rpc_max_response_body_size_errors() {
+    let _env = EnvGuard::new();
+
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let config_path = temp_dir.path().join("oversized_rpc_config.toml");
+
+    let invalid_config = r#"
+[rpc]
+max_response_body_size = 4294967296
+"#;
+
+    fs::write(&config_path, invalid_config).expect("write oversized RPC config");
+
+    let error = ZebradConfig::load(Some(config_path))
+        .expect_err("Should fail to load oversized RPC max response body size");
+
+    let error = error.to_string();
+    assert!(error.contains("max_response_body_size"));
+    assert!(error.contains("4294967296"));
 }
 
 #[test]

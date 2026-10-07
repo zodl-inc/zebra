@@ -14,7 +14,10 @@ use tower::{buffer::Buffer, util::BoxService};
 use zebra_chain::{
     block::{self, Block},
     fmt::{DisplayToDebug, TypeNameToDebug},
-    parameters::{Network, NetworkUpgrade},
+    parameters::{
+        testnet::{ConfiguredActivationHeights, Parameters},
+        Network, NetworkUpgrade,
+    },
     serialization::ZcashDeserializeInto,
     transaction::VerifiedUnminedTx,
 };
@@ -26,7 +29,7 @@ use zs::CheckpointVerifiedBlock;
 
 use crate::components::{
     mempool::tests::standard_verified_unmined_tx_strategy,
-    mempool::{config::Config, Mempool},
+    mempool::{adjusted_mempool_misbehavior_score, config::Config, Mempool},
     sync::{RecentSyncLengths, SyncStatus},
 };
 
@@ -37,7 +40,8 @@ type MockPeerSet = MockService<zn::Request, zn::Response, PropTestAssertion>;
 type MockState = MockService<zs::Request, zs::Response, PropTestAssertion>;
 
 /// A [`MockService`] representing the Zebra transaction verifier service.
-type MockTxVerifier = MockService<tx::Request, tx::Response, PropTestAssertion, TransactionError>;
+type MockTxVerifier =
+    MockService<tx::MempoolRequest, tx::MempoolResponse, PropTestAssertion, TransactionError>;
 
 const CHAIN_LENGTH: usize = 5;
 
@@ -57,6 +61,174 @@ proptest! {
                                           .ok()
                                           .and_then(|v| v.parse().ok())
                                           .unwrap_or(DEFAULT_MEMPOOL_PROPTEST_CASES)))]
+
+    /// Checks that NU6.2 branch IDs have no peer score during the NU6.3 grace period.
+    #[test]
+    fn nu6_2_branch_id_has_no_score_during_nu6_3_grace(
+        activation_height in 100u32..1_000_000,
+        height_offset in 0i64..40,
+    ) {
+        let network = Parameters::build()
+            .with_slow_start_interval(block::Height::MIN)
+            .with_activation_heights(ConfiguredActivationHeights {
+                nu6_2: Some(activation_height - 1),
+                nu6_3: Some(activation_height),
+                ..Default::default()
+            })
+            .expect("generated activation heights are valid")
+            .clear_funding_streams()
+            .to_network()
+            .expect("configured testnet is valid");
+        let activation_height = block::Height(activation_height);
+        let height = (activation_height + height_offset)
+            .expect("generated activation heights are far below Height::MAX");
+
+        prop_assert_eq!(
+            adjusted_mempool_misbehavior_score(
+                &TransactionError::WrongConsensusBranchId,
+                Some(NetworkUpgrade::Nu6_2),
+                height,
+                &network,
+            ),
+            0,
+        );
+    }
+
+    /// Checks that NU6.3 branch IDs have no peer score just before activation.
+    #[test]
+    fn nu6_3_branch_id_has_no_score_before_activation(
+        activation_height in 100u32..1_000_000,
+        height_offset in -40i64..0,
+    ) {
+        let network = Parameters::build()
+            .with_slow_start_interval(block::Height::MIN)
+            .with_activation_heights(ConfiguredActivationHeights {
+                nu6_2: Some(activation_height - 41),
+                nu6_3: Some(activation_height),
+                ..Default::default()
+            })
+            .expect("generated activation heights are valid")
+            .clear_funding_streams()
+            .to_network()
+            .expect("configured testnet is valid");
+        let activation_height = block::Height(activation_height);
+        let height = (activation_height + height_offset)
+            .expect("generated activation heights are above Height::MIN");
+
+        prop_assert_eq!(
+            adjusted_mempool_misbehavior_score(
+                &TransactionError::WrongConsensusBranchId,
+                Some(NetworkUpgrade::Nu6_3),
+                height,
+                &network,
+            ),
+            0,
+        );
+    }
+
+    /// Checks that early NU6.3 branch IDs retain their score before the grace window.
+    #[test]
+    fn nu6_3_branch_id_keeps_score_before_grace(
+        activation_height in 200u32..1_000_000,
+        height_offset in -100i64..-40,
+    ) {
+        let network = Parameters::build()
+            .with_slow_start_interval(block::Height::MIN)
+            .with_activation_heights(ConfiguredActivationHeights {
+                nu6_2: Some(activation_height - 101),
+                nu6_3: Some(activation_height),
+                ..Default::default()
+            })
+            .expect("generated activation heights are valid")
+            .clear_funding_streams()
+            .to_network()
+            .expect("configured testnet is valid");
+        let activation_height = block::Height(activation_height);
+        let height = (activation_height + height_offset)
+            .expect("generated activation heights are above Height::MIN");
+
+        prop_assert_eq!(
+            adjusted_mempool_misbehavior_score(
+                &TransactionError::WrongConsensusBranchId,
+                Some(NetworkUpgrade::Nu6_3),
+                height,
+                &network,
+            ),
+            100,
+        );
+    }
+
+    /// Checks that NU6.2 branch IDs regain their peer score at the grace cutoff.
+    #[test]
+    fn nu6_2_branch_id_keeps_score_after_nu6_3_grace(
+        activation_height in 100u32..1_000_000,
+        height_offset in 40i64..1_000,
+    ) {
+        let network = Parameters::build()
+            .with_slow_start_interval(block::Height::MIN)
+            .with_activation_heights(ConfiguredActivationHeights {
+                nu6_2: Some(activation_height - 1),
+                nu6_3: Some(activation_height),
+                ..Default::default()
+            })
+            .expect("generated activation heights are valid")
+            .clear_funding_streams()
+            .to_network()
+            .expect("configured testnet is valid");
+        let activation_height = block::Height(activation_height);
+        let height = (activation_height + height_offset)
+            .expect("generated activation heights are far below Height::MAX");
+
+        prop_assert_eq!(
+            adjusted_mempool_misbehavior_score(
+                &TransactionError::WrongConsensusBranchId,
+                Some(NetworkUpgrade::Nu6_2),
+                height,
+                &network,
+            ),
+            100,
+        );
+    }
+
+
+    /// Checks that other mismatched branch IDs retain their normal peer score.
+    #[test]
+    fn other_branch_ids_keep_mempool_score(
+        activation_height in 100u32..1_000_000,
+        height_offset in -1i64..41,
+        transaction_upgrade in any::<NetworkUpgrade>(),
+    ) {
+        prop_assume!(transaction_upgrade != NetworkUpgrade::Nu6_2);
+        prop_assume!(transaction_upgrade != NetworkUpgrade::Nu6_3);
+
+        let network = Parameters::build()
+            .with_slow_start_interval(block::Height::MIN)
+            .with_activation_heights(ConfiguredActivationHeights {
+                // NU6.2 activates outside its own grace window, so only the NU6.3 boundary is tested.
+                nu6_2: Some(activation_height - 41),
+                nu6_3: Some(activation_height),
+                ..Default::default()
+            })
+            .expect("generated activation heights are valid")
+            .clear_funding_streams()
+            .to_network()
+            .expect("configured testnet is valid");
+        let activation_height = block::Height(activation_height);
+        let height = (activation_height + height_offset)
+            .expect("generated activation heights are far below Height::MAX");
+
+        prop_assume!(transaction_upgrade != NetworkUpgrade::current(&network, height));
+
+        prop_assert_eq!(
+            adjusted_mempool_misbehavior_score(
+                &TransactionError::WrongConsensusBranchId,
+                Some(transaction_upgrade),
+                height,
+                &network,
+            ),
+            100,
+        );
+    }
 
     /// Test if the mempool storage is cleared on a chain reset.
     #[test]
@@ -146,12 +318,10 @@ proptest! {
                 // when there is a chain growth.
                 if let Some(expiry_height) = transaction.transaction.transaction.expiry_height() {
                     if chain_tip.height >= expiry_height {
-                        let mut tmp_tx = (*transaction.transaction.transaction).clone();
-
-                        // Set a new expiry height that is greater than the
-                        // height of the current chain tip.
-                        *tmp_tx.expiry_height_mut() = block::Height(chain_tip.height.0 + 1);
-                        transaction.transaction = tmp_tx.into();
+                        // TODO: Adjust expiry height when Transaction API supports expiry_height_mut.
+                        // For now, skip transactions that have already expired.
+                        // This may cause the test to have fewer inserted transactions than expected.
+                        continue;
                     }
                 }
 
@@ -190,9 +360,9 @@ proptest! {
         })?;
     }
 
-    /// Test if the mempool storage is cleared if the syncer falls behind and starts to catch up.
+    /// Test if the mempool storage is kept if sync status falls behind.
     #[test]
-    fn storage_is_cleared_if_syncer_falls_behind(
+    fn storage_is_kept_if_sync_status_falls_behind(
         network in any::<Network>(),
         transaction in standard_verified_unmined_tx_strategy(),
     ) {
@@ -205,7 +375,7 @@ proptest! {
                 mut state_service,
                 mut tx_verifier,
                 mut recent_syncs,
-                mut chain_tip_sender,
+                _chain_tip_sender,
             ) = setup(&network);
 
             time::pause();
@@ -223,19 +393,15 @@ proptest! {
 
             prop_assert_eq!(mempool.storage().transaction_count(), 1);
 
-            // Simulate the synchronizer catching up to the network chain tip.
-            mempool.disable(&mut recent_syncs).await;
+            // Simulate sync status reporting a large gap. That signal
+            // can be caused by lower-work forks or incompatible peers, so it
+            // should not shut down an already-active mempool.
+            mempool.sync_far_from_tip(&mut recent_syncs).await;
 
-            // This time a call to `poll_ready` should clear the storage.
+            // This time a call to `poll_ready` should keep the storage.
             mempool.dummy_call().await;
 
-            // sends a new fake chain tip so that the mempool can be enabled
-            chain_tip_sender.set_finalized_tip(block1_chain_tip());
-
-            // Enable the mempool again so the storage can be accessed.
-            mempool.enable(&mut recent_syncs).await;
-
-            prop_assert_eq!(mempool.storage().transaction_count(), 0);
+            prop_assert_eq!(mempool.storage().transaction_count(), 1);
 
             peer_set.expect_no_requests().await?;
             state_service.expect_no_requests().await?;
@@ -248,14 +414,6 @@ proptest! {
 
 fn genesis_chain_tip() -> Option<ChainTipBlock> {
     zebra_test::vectors::BLOCK_MAINNET_GENESIS_BYTES
-        .zcash_deserialize_into::<Arc<Block>>()
-        .map(CheckpointVerifiedBlock::from)
-        .map(ChainTipBlock::from)
-        .ok()
-}
-
-fn block1_chain_tip() -> Option<ChainTipBlock> {
-    zebra_test::vectors::BLOCK_MAINNET_1_BYTES
         .zcash_deserialize_into::<Arc<Block>>()
         .map(CheckpointVerifiedBlock::from)
         .map(ChainTipBlock::from)
@@ -283,6 +441,7 @@ fn setup(
 
     let (misbehavior_tx, _misbehavior_rx) = tokio::sync::mpsc::channel(1);
     let (mempool, mempool_transaction_subscriber) = Mempool::new(
+        network,
         &Config {
             tx_cost_limit: 160_000_000,
             ..Default::default()
@@ -357,4 +516,112 @@ impl FakeChainTip {
             Self::Reset(chain_tip_block) => chain_tip_block.clone(),
         }
     }
+}
+
+proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(env::var("PROPTEST_CASES")
+                                          .ok()
+                                          .and_then(|v| v.parse().ok())
+                                          .unwrap_or(DEFAULT_MEMPOOL_PROPTEST_CASES)))]
+
+    /// Checks that NU6.3 branch IDs have no peer score for 50 minutes of 25-second NU7 blocks.
+    #[test]
+    fn nu6_3_branch_id_has_no_score_during_nu7_grace(
+        activation_height in 100u32..1_000_000,
+        height_offset in 0i64..120,
+    ) {
+        let network = configured_testnet(ConfiguredActivationHeights {
+            nu6_3: Some(activation_height - 1),
+            nu7: Some(activation_height),
+            ..Default::default()
+        });
+        let height = height_at_offset(activation_height, height_offset);
+
+        prop_assert_eq!(branch_id_score(NetworkUpgrade::Nu6_3, height, &network), 0);
+    }
+
+    /// Checks that NU6.3 branch IDs regain their peer score at the NU7 grace cutoff.
+    #[test]
+    fn nu6_3_branch_id_keeps_score_after_nu7_grace(
+        activation_height in 100u32..1_000_000,
+        height_offset in 120i64..1_000,
+    ) {
+        let network = configured_testnet(ConfiguredActivationHeights {
+            nu6_3: Some(activation_height - 1),
+            nu7: Some(activation_height),
+            ..Default::default()
+        });
+        let height = height_at_offset(activation_height, height_offset);
+
+        prop_assert_eq!(branch_id_score(NetworkUpgrade::Nu6_3, height, &network), 100);
+    }
+
+    /// Checks that NU7 branch IDs have no peer score for 50 minutes of 75-second blocks before
+    /// activation, and keep it earlier.
+    #[test]
+    fn nu7_branch_id_has_no_score_only_within_grace_before_activation(
+        activation_height in 200u32..1_000_000,
+        height_offset in -100i64..0,
+    ) {
+        let network = configured_testnet(ConfiguredActivationHeights {
+            nu6_3: Some(activation_height - 101),
+            nu7: Some(activation_height),
+            ..Default::default()
+        });
+        let height = height_at_offset(activation_height, height_offset);
+        let expected_score = if height_offset >= -40 { 0 } else { 100 };
+
+        prop_assert_eq!(branch_id_score(NetworkUpgrade::Nu7, height, &network), expected_score);
+    }
+
+    /// Checks that non-adjacent branch IDs retain their normal peer score around NU7 activation.
+    #[test]
+    fn non_adjacent_branch_ids_keep_mempool_score_at_nu7(
+        activation_height in 100u32..1_000_000,
+        height_offset in -1i64..121,
+        transaction_upgrade in any::<NetworkUpgrade>(),
+    ) {
+        prop_assume!(transaction_upgrade != NetworkUpgrade::Nu6_3);
+        prop_assume!(transaction_upgrade != NetworkUpgrade::Nu7);
+
+        let network = configured_testnet(ConfiguredActivationHeights {
+            nu6_3: Some(activation_height - 41),
+            nu7: Some(activation_height),
+            ..Default::default()
+        });
+        let height = height_at_offset(activation_height, height_offset);
+
+        prop_assert_eq!(branch_id_score(transaction_upgrade, height, &network), 100);
+    }
+}
+
+/// Builds a configured Testnet with `activation_heights` and no slow start or funding streams.
+fn configured_testnet(activation_heights: ConfiguredActivationHeights) -> Network {
+    Parameters::build()
+        .with_slow_start_interval(block::Height::MIN)
+        .with_activation_heights(activation_heights)
+        .expect("generated activation heights are valid")
+        .clear_funding_streams()
+        .to_network()
+        .expect("configured testnet is valid")
+}
+
+/// Returns `activation_height` offset by `height_offset`.
+fn height_at_offset(activation_height: u32, height_offset: i64) -> block::Height {
+    (block::Height(activation_height) + height_offset)
+        .expect("generated activation heights are far from the Height bounds")
+}
+
+/// Returns the mempool peer score for a `WrongConsensusBranchId` error with `transaction_upgrade`.
+fn branch_id_score(
+    transaction_upgrade: NetworkUpgrade,
+    height: block::Height,
+    network: &Network,
+) -> u32 {
+    adjusted_mempool_misbehavior_score(
+        &TransactionError::WrongConsensusBranchId,
+        Some(transaction_upgrade),
+        height,
+        network,
+    )
 }

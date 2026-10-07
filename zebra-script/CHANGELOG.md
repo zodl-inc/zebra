@@ -1,9 +1,67 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and this project adheres to [Semantic Versioning](https://semver.org).
+
+## [13.0.0] - 2026-10-01
+
+### Breaking Changes
+
+- Updated `libzcash_script` to 0.2 and `zcash_script` to 0.6, whose `libzcash_script::Error` appears in `Error::Unknown` and `Sigops::sigops`, along with `zcash_primitives` 0.31.0-pre.0 and `zcash_transparent` 0.11.0-pre.0 for NU7 ([#11559](https://github.com/ZcashFoundation/zebra/pull/11559)).
+
+## [12.0.0] - 2026-09-23
+
+### Breaking Changes
+
+- `zebra-chain`'s `Transaction` type is now a newtype over `zcash_primitives::transaction::Transaction`, and appears in this crate's public API ([#10461](https://github.com/ZcashFoundation/zebra/pull/10461)).
+- `Sigops::scripts` returns `Vec<Vec<u8>>` instead of an iterator. Transaction inputs and outputs are rebuilt from `zcash_primitives` on each call, so the scripts cannot borrow from the transaction ([#10461](https://github.com/ZcashFoundation/zebra/pull/10461)).
+- Removed `CachedFfiTransaction::inputs()`. It is no longer needed inside Zebra, and with `Transaction` now wrapping `zcash_primitives` it could only return a copy of the inputs, which caused quadratic memory consumption when every input is verified concurrently ([#11353](https://github.com/ZcashFoundation/zebra/pull/11353)). Eventually it might be replaced by a method that returns a reference to the original `zcash_transparent` inputs ([#10461](https://github.com/ZcashFoundation/zebra/pull/10461)).
+
+## [11.0.0] - 2026-08-10
+
+### Breaking Changes
+
+- Requires `zebra-chain` 12.0.0, whose transaction, transparent output, network upgrade, and error
+  types appear in this crate's public API.
+
+### Changed
+
+- Updated the following local packages: zebra-chain
+
+## [10.1.2] - 2026-07-27
+
+### Changed
+
+- Updated `zcash_primitives` to 0.30. No other changes to this crate
+  ([#11111](https://github.com/ZcashFoundation/zebra/pull/11111)).
+- `zebra-chain` dependency bumped to `11.3.0`.
+
+## [10.1.1] - 2026-07-17
+
+### Changed
+
+- `zebra-chain` dependency bumped to `11.2.0`.
+
+## [10.1.0] - 2026-07-10
+
+### Added
+
+- The per-input P2SH sigop counter `p2sh_input_sigop_count` is now public, so callers
+  can apply per-input standardness limits (zcashd's `MAX_P2SH_SIGOPS`) in addition to
+  the existing transaction-wide `p2sh_sigop_count` total.
+
+### Changed
+
+- MSRV is now 1.88
+
+## [10.0.0] - 2026-07-02
+
+### Changed
+
+- `zebra-chain` dependency bumped to `11.0.0`.
+- Migrated to `zcash_primitives 0.29.0-pre.0`. No other changes to this crate.
 
 ## [9.0.0] - 2026-06-10
 

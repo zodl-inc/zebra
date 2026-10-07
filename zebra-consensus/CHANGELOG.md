@@ -1,11 +1,209 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and this project adheres to [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [17.0.0] - 2026-10-01
+
+### Breaking Changes
+
+- [ZIP 218](https://zips.z.cash/zip-0218) shielded action limits, enforced from NU7 activation before coinbase output recovery: at most 330 actions per Orchard or Ironwood pool, 300 Sapling inputs plus outputs, and zero Sprout JoinSplits per block. The shared budget requires Orchard actions + Ironwood actions + Sapling inputs and outputs + twice the JoinSplit count to be at most 330. Adds `block::check::shielded_action_limits_are_valid`, `block::{ORCHARD_BLOCK_ACTION_LIMIT, SAPLING_BLOCK_IO_LIMIT, SPROUT_BLOCK_JOIN_SPLIT_LIMIT, GLOBAL_SHIELDED_BUDGET}`, and shared `block::ShieldedActionCounts` accounting for template builders. Struct literals must include the public `ironwood_actions` field; exhaustive error matches must handle `BlockError::TooManyShieldedActions`. ([#11529](https://github.com/ZcashFoundation/zebra/pull/11529))
+- Removed `block::subsidy` and the crate-root `funding_stream_address` re-export. Use `zebra_chain::parameters::subsidy::funding_stream_address` ([#11530](https://github.com/ZcashFoundation/zebra/pull/11530)).
+- Exhaustive matches on `error::TransactionError` must handle the new `TooManyShieldedActions { pool, count, limit }` variant. NU7 mempool admission rejects transactions exceeding a ZIP 218 block budget before state access or proof verification; these policy rejections have zero peer misbehavior score ([#11529](https://github.com/ZcashFoundation/zebra/pull/11529)).
+- Updated `zcash_primitives` and `zcash_proofs` to 0.31.0-pre.0 for NU7, along with `orchard` 0.16, `sapling-crypto` 0.9, `halo2_proofs` 0.4, `bellman` 0.15, `bls12_381` 0.9, `jubjub` 0.11, `reddsa` 0.6, `redjubjub` 0.9, `zcash_script` 0.6 and `libzcash_script` 0.2. Groth16 types now come from the `groth16` 0.2 crate instead of `bellman::groth16`, so `groth16::Item` converts from `groth16::batch::Item` and `groth16::SPROUT` holds `groth16` verifying keys. `ed25519::Item` is built from `ed25519-zebra` 5.0.0 types ([#11559](https://github.com/ZcashFoundation/zebra/pull/11559)).
+
+### Changed
+
+- From the configured NSM reissuance height, block verification leaves subsidy, funding-stream, and miner-fee validation to contextual state verification against the exact parent NSM balance; before that height semantic verification retains those checks ([#11454](https://github.com/ZcashFoundation/zebra/pull/11454), [#11530](https://github.com/ZcashFoundation/zebra/pull/11530)).
+
+## [16.0.0] - 2026-09-23
+
+### Breaking Changes
+
+- `zebra-chain`'s `Transaction` type is now a newtype over `zcash_primitives::transaction::Transaction`, and appears throughout this crate's public API ([#10461](https://github.com/ZcashFoundation/zebra/pull/10461)).
+- Replaced `groth16::Item::from_joinsplit` with `groth16::joinsplit_to_item`, which takes the `zcash_primitives` `JsDescription` that transactions now carry. The `groth16::Description` trait and `groth16::DescriptionWrapper` are removed, leaving a single JoinSplit primary-input encoder: the one the verifier uses ([#10461](https://github.com/ZcashFoundation/zebra/pull/10461)).
+
+### Added
+
+- A `fuzzing` feature, off by default, which makes the `block` module public for the coverage-guided fuzz harnesses in `zebra-fuzz/`. It activates no dependencies and leaves default and release builds unchanged ([#11221](https://github.com/ZcashFoundation/zebra/pull/11221)).
+- `sapling_prover()`, which returns the shared Sapling prover, so callers that build Sapling outputs do not have to parse the bundled Sapling parameters again ([#11337](https://github.com/ZcashFoundation/zebra/pull/11337)).
+- `is_auth_commitment_mismatch()` on `VerifyBlockError`, `VerifyCheckpointError` and `RouterError`, forwarding to `zebra_state::ValidateContextError::is_auth_commitment_mismatch()`, and `is_descendant_of_auth_commitment_mismatch()` on `VerifyBlockError` and `RouterError`.
+
+### Changed
+
+- Orchard, Ironwood, and Sapling bundle verification results are cached, so a proof or signature verified when its transaction entered the mempool is not verified again when the block that mines it arrives. The public Halo2 verifier API is unchanged. Each cache reports hits, misses, inserts, evictions and size under `zebra.consensus.cache.*` ([#11380](https://github.com/ZcashFoundation/zebra/pull/11380)).
+
+### Fixed
+
+- The checkpoint verifier now resets its progress to the state tip only when a block it accepted fails to commit to the state. It used to reset on any error, including rejections of side-chain, duplicate, or invalid blocks, which could rewind it below the last verified checkpoint while a checkpoint range was still committing and stall verification until the skipped blocks were submitted again ([#11385](https://github.com/ZcashFoundation/zebra/pull/11385)).
+
+### Security
+
+- `misbehavior_score()` now returns 100 for a block that contains duplicate transactions, so `error::BlockError::DuplicateTransaction` is scored like the other definitive block-validity violations. The score reported by `router::RouterError`, `VerifyBlockError`, and `VerifyCheckpointError` for this error changes from 0 to 100 ([#11157](https://github.com/ZcashFoundation/zebra/pull/11157)).
+- `VerifyCheckpointError::misbehavior_score()` now unwraps the boxed `CommitCheckpointVerifiedError`, mirroring `is_duplicate_request()`, so misbehaviour scores from contextual validation reach the syncer during checkpoint sync. Checkpoint verification only checks the block hash, so a block body forged to keep that hash reaches contextual validation on the checkpoint path too, and its score was previously lost ([GHSA-3c94-hf7p-g5mf](https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-3c94-hf7p-g5mf)). Thanks to @ouicate for reporting the issue.
+
+## [15.0.0] - 2026-08-10
+
+### Breaking Changes
+
+- Split the unified transaction verifier API into separate
+  `transaction::BlockTxVerifier` and `transaction::MempoolTxVerifier`
+  services with dedicated request/response types
+  ([#11095](https://github.com/ZcashFoundation/zebra/pull/11095)).
+- Removed the unified verifier API ([#11095](https://github.com/ZcashFoundation/zebra/pull/11095)):
+  - `transaction::Verifier`
+  - `transaction::Request`
+  - `transaction::Response`
+- `transaction::BlockRequest::transaction_hash` must now be the hash of the request's
+  `transaction`. It is used to build `BlockResponse::tx_id` instead of re-hashing the
+  transaction, so a mismatched value yields a response identifying a different transaction.
+  A debug assertion checks this in test and debug builds
+  ([#11095](https://github.com/ZcashFoundation/zebra/pull/11095)).
+- The second value returned by `router::init` and `router::init_test` is now a
+  `transaction::MempoolTxVerifier` service and can no longer verify block
+  transactions. Callers verifying transactions as part of block verification
+  should construct a `transaction::BlockTxVerifier` directly.
+  ([#11095](https://github.com/ZcashFoundation/zebra/pull/11095)).
+
+### Added
+
+- `transaction::BlockTxVerifier` and `transaction::MempoolTxVerifier`
+  ([#11095](https://github.com/ZcashFoundation/zebra/pull/11095)).
+- `transaction::BlockRequest`, `transaction::BlockResponse`,
+  `transaction::MempoolRequest`, and `transaction::MempoolResponse`
+  ([#11095](https://github.com/ZcashFoundation/zebra/pull/11095)).
+
+## [14.0.1] - 2026-07-27
+
+### Changed
+
+- Updated `zcash_primitives` and `zcash_proofs` to 0.30, `zcash_keys` to 0.16, and
+  `zcash_transparent` to 0.10
+  ([#11111](https://github.com/ZcashFoundation/zebra/pull/11111)).
+- `zebra-chain` dependency bumped to `11.3.0`.
+- `zebra-node-services` dependency bumped to `9.1.2`.
+- `zebra-script` dependency bumped to `10.1.2`.
+- `zebra-state` dependency bumped to `12.0.1`.
+
+## [14.0.0] - 2026-07-24
+
+### Changed
+
+- Requires `zebra-state` 12.0.0, whose types appear in this crate's public API
+  (`error::BlockError`, `error::TransactionError`, and the state service bounds on
+  `router::init` and the verifiers).
+
+## [13.0.0] - 2026-07-22
+
+### Added
+
+- `error::TransactionError`:
+  - `Halo2VerificationFailed`
+  - `SaplingVerificationFailed`
+
+### Changed
+
+- `zebra-state` dependency bumped to `11.1.1`.
+
+### Removed
+
+- `transaction::Verifier::check_maturity_height` is now private
+  ([#10843](https://github.com/ZcashFoundation/zebra/pull/10843)).
+
+### Security
+
+- Check the ZIP-317 mempool rules before verifying a transaction's shielded proofs, so an
+  underpaying transaction is rejected before the expensive cryptographic checks run
+  ([#11053](https://github.com/ZcashFoundation/zebra/pull/11053)).
+- Score failed shielded proof and signature verifications, and non-canonical Orchard and
+  Ironwood proof sizes, as mempool misbehaviour, so a peer sending invalid shielded transactions
+  is disconnected instead of repeatedly forcing their verification
+  ([#11054](https://github.com/ZcashFoundation/zebra/pull/11054)).
+
+## [12.0.1] - 2026-07-17
+
+### Changed
+
+- `zebra-state` dependency bumped to `11.1.0`.
+
+## [12.0.0] - 2026-07-17
+
+### Changed
+
+- Requires `zebra-state` 11.0.0. `zebra-state` types (`error::ValidateContextError`,
+  `request::Request`, `response::{Response, KnownBlock}`) appear in this crate's public API,
+  so `zebra-state`'s major bump is breaking here too.
+- `tower-batch-control` dependency bumped to `1.1.1`.
+- `tower-fallback` dependency bumped to `0.2.43`.
+- `zebra-chain` dependency bumped to `11.2.0`.
+- `zebra-node-services` dependency bumped to `9.1.1`.
+- `zebra-script` dependency bumped to `10.1.1`.
+
+## [11.0.0] - 2026-07-10
+
+### Added
+
+- `error::TransactionError`:
+  - `NonStandardInputs`
+  - `NonStandardScriptSigNotPushOnly { input_index }`
+  - `NonStandardScriptSigSize { input_index, size }`
+- `transaction::check`:
+  - `MAX_P2SH_SIGOPS`
+  - `MAX_STANDARD_SCRIPTSIG_SIZE`
+  - `are_inputs_standard`
+  - `mempool_standard_input_scripts`
+  - `standard_script_kind`
+
+### Changed
+
+- MSRV is now 1.88
+
+### Security
+
+- Mempool transactions with non-standard transparent inputs are now rejected before
+  script verification, reducing DoS surface
+  ([GHSA-84j3-rw4c-gqmj](https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-84j3-rw4c-gqmj)).
+  Thanks to @ouicate for reporting the issue. Script verification also now runs on
+  the shared Rayon thread pool to avoid blocking the runtime.
+
+## [10.0.0] - 2026-07-02
+
+### Added
+
+- `error::TransactionError`:
+  - `CoinbaseHasEnableSpendsIronwood`
+  - `CoinbaseHasOrchardActions`
+  - `DuplicateIronwoodNullifier`
+  - `IronwoodProofSize`
+  - `NegativeOrchardValueBalance`
+  - `NotEnoughIronwoodFlags`
+  - `OrchardHasEnableCrossAddress`
+- `transaction::check`:
+  - `coinbase_orchard_component_empty`
+  - `has_enough_ironwood_flags`
+  - `orchard_cross_address_disabled`
+  - `orchard_value_balance_non_negative`
+- A third Orchard Action verifier era for the NU6.3 cross-address circuit:
+  - `halo2::VERIFYING_KEY_NU6_3_ONWARD` and `halo2::VERIFIER_NU6_3_ONWARD`
+  - `halo2::orchard_v6_verifier` (for v6 Orchard and Ironwood bundles) and `halo2::VerifierService`
+
+### Changed
+
+- Migrated to `zcash_primitives 0.29.0-pre.0` (and the rest of the librustzcash NU6.3
+  pre-release wave: `orchard 0.15.0-pre.1`, `zcash_proofs 0.29.0-pre.0`,
+  `zcash_protocol 0.10.0-pre.0`, `zcash_transparent 0.9.0-pre.0`).
+- `error::TransactionError::NotEnoughFlags` renamed to `NotEnoughOrchardFlags`, for symmetry with
+  the new `NotEnoughIronwoodFlags` variant.
+- `halo2::VERIFIER_PRE_NU6_2` is now declared via the `halo2::VerifierService` alias (the
+  underlying type is unchanged).
+- The Orchard Action verifying keys are now named by circuit era rather than transaction version,
+  because a bundle's key is selected by block era, not transaction version:
+  - `halo2::VERIFYING_KEY_POST_NU6_2` renamed to `halo2::VERIFYING_KEY_NU6_2`, and
+    `halo2::VERIFIER_POST_NU6_2` to `halo2::VERIFIER_NU6_2`.
+  - `halo2::verifier_for` renamed to `halo2::orchard_v5_verifier_for`; from NU6.3 it routes v5
+    Orchard bundles to the NU6.3 key (the same key as v6 Orchard and Ironwood).
 
 ## [9.0.1] - 2026-06-18
 

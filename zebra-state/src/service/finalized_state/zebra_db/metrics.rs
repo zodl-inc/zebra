@@ -15,14 +15,14 @@ pub(crate) fn block_precommit_metrics(block: &Block, hash: block::Hash, height: 
     let transparent_prevout_count = block
         .transactions
         .iter()
-        .flat_map(|t| t.inputs().iter())
+        .flat_map(|t| t.inputs().into_iter())
         .count()
         // Each block has a single coinbase input which is not a previous output.
         - 1;
     let transparent_newout_count = block
         .transactions
         .iter()
-        .flat_map(|t| t.outputs().iter())
+        .flat_map(|t| t.outputs().into_iter())
         .count();
 
     let sprout_nullifier_count = block.sprout_nullifiers().count();
@@ -85,6 +85,8 @@ pub(crate) fn value_pool_metrics(value_pool: &ValueBalance<NonNegative>) {
         .set(u64::from(value_pool.sapling_amount()) as f64);
     metrics::gauge!("state.finalized.value_pool.orchard")
         .set(u64::from(value_pool.orchard_amount()) as f64);
+    metrics::gauge!("state.finalized.value_pool.ironwood")
+        .set(u64::from(value_pool.ironwood_amount()) as f64);
     metrics::gauge!("state.finalized.value_pool.deferred")
         .set(u64::from(value_pool.deferred_amount()) as f64);
 
@@ -93,6 +95,7 @@ pub(crate) fn value_pool_metrics(value_pool: &ValueBalance<NonNegative>) {
         + u64::from(value_pool.sprout_amount())
         + u64::from(value_pool.sapling_amount())
         + u64::from(value_pool.orchard_amount())
+        + u64::from(value_pool.ironwood_amount())
         + u64::from(value_pool.deferred_amount());
     metrics::gauge!("state.finalized.chain_supply.total").set(total_supply as f64);
 }

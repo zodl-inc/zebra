@@ -20,10 +20,15 @@ use std::{
 };
 
 use zebra_chain::{
-    amount::DeferredPoolBalanceChange,
+    amount::{DeferredPoolBalanceChange, NonNegative},
     block,
     parallel::tree::NoteCommitmentTrees,
-    parameters::{subsidy::block_subsidy, Network},
+    parameters::{
+        subsidy::{block_subsidy_with_parent_pools, SubsidyError},
+        Network,
+    },
+    primitives::zcash_history::BlockCommitmentTreeRoots,
+    value_balance::ValueBalance,
 };
 use zebra_db::{
     chain::BLOCK_INFO,
@@ -98,6 +103,12 @@ pub const STATE_COLUMN_FAMILIES_IN_CODE: &[&str] = &[
     "orchard_anchors",
     "orchard_note_commitment_tree",
     "orchard_note_commitment_subtree",
+    // Ironwood (NU6.3). Always registered so the database format is stable across build
+    // flags; these stay empty until NU6.3 transactions appear.
+    "ironwood_nullifiers",
+    "ironwood_anchors",
+    "ironwood_note_commitment_tree",
+    "ironwood_note_commitment_subtree",
     // Chain
     "history_tree",
     "tip_chain_value_pool",
@@ -191,8 +202,8 @@ impl FinalizedState {
             let transport = TransportBuilder::new(conn_pool)
                 .cert_validation(CertificateValidation::None)
                 .auth(Basic(
-                    config.clone().elasticsearch_username,
-                    config.clone().elasticsearch_password,
+                    config.elasticsearch_username.clone(),
+                    config.elasticsearch_password.as_str().to_string(),
                 ))
                 .build()
                 .expect("elasticsearch transport builder should not fail");
@@ -382,8 +393,17 @@ impl FinalizedState {
                 let history_tree_mut = Arc::make_mut(&mut history_tree);
                 let sapling_root = note_commitment_trees.sapling.root();
                 let orchard_root = note_commitment_trees.orchard.root();
+                let ironwood_root = note_commitment_trees.ironwood.root();
                 history_tree_mut
-                    .push(&self.network(), block.clone(), &sapling_root, &orchard_root)
+                    .push(
+                        &self.network(),
+                        block.clone(),
+                        BlockCommitmentTreeRoots {
+                            sapling: &sapling_root,
+                            orchard: &orchard_root,
+                            ironwood: &ironwood_root,
+                        },
+                    )
                     .map_err(Arc::new)
                     .map_err(ValidateContextError::from)?;
 
@@ -393,6 +413,16 @@ impl FinalizedState {
                 };
 
                 let height = checkpoint_verified.height;
+                let deferred_pool_balance_change = calculate_deferred_pool_balance_change(
+                    height,
+                    &self.network(),
+                    self.db.finalized_value_pool(),
+                )
+                .map_err(|subsidy_error| ValidateContextError::InvalidSubsidy {
+                    subsidy_error: subsidy_error.into(),
+                    height,
+                    block_hash: checkpoint_verified.hash,
+                })?;
 
                 (
                     height,
@@ -400,7 +430,7 @@ impl FinalizedState {
                     FinalizedBlock::from_checkpoint_verified(
                         checkpoint_verified,
                         treestate,
-                        calculate_deferred_pool_balance_change(height, &self.network()),
+                        deferred_pool_balance_change,
                     ),
                     Some(prev_note_commitment_trees),
                 )
@@ -410,13 +440,24 @@ impl FinalizedState {
                 treestate,
             } => {
                 let height = contextually_verified.height;
+                let deferred_pool_balance_change = calculate_deferred_pool_balance_change(
+                    height,
+                    &self.network(),
+                    self.db.finalized_value_pool(),
+                )
+                .map_err(|subsidy_error| ValidateContextError::InvalidSubsidy {
+                    subsidy_error: subsidy_error.into(),
+                    height,
+                    block_hash: contextually_verified.hash,
+                })?;
+
                 (
                     height,
                     contextually_verified.hash,
                     FinalizedBlock::from_contextually_verified(
                         contextually_verified,
                         treestate,
-                        calculate_deferred_pool_balance_change(height, &self.network()),
+                        deferred_pool_balance_change,
                     ),
                     prev_note_commitment_trees,
                 )
@@ -583,11 +624,7 @@ impl FinalizedState {
             None => return false,
         };
 
-        if block_height < debug_stop_at_height {
-            return false;
-        }
-
-        true
+        block_height >= debug_stop_at_height
     }
 
     /// Exit the host process.
@@ -616,26 +653,20 @@ impl FinalizedState {
     }
 }
 
-/// Calculates the deferred pool balance change for a given height and network.
-///
-/// Returns a deferred pool balance change of zero if it cannot be calculated.
+/// Calculates deferred issuance and fixed lockbox disbursements using the exact parent's pools.
 pub(crate) fn calculate_deferred_pool_balance_change(
     height: block::Height,
     network: &Network,
-) -> DeferredPoolBalanceChange {
-    if height > network.slow_start_interval() {
-        zebra_chain::parameters::subsidy::funding_stream_values(
-            height,
-            network,
-            block_subsidy(height, network).unwrap_or_default(),
-        )
-        .unwrap_or_default()
-        .remove(&zebra_chain::parameters::subsidy::FundingStreamReceiver::Deferred)
-        .unwrap_or_default()
-        .checked_sub(network.lockbox_disbursement_total_amount(height))
-        .map(DeferredPoolBalanceChange::new)
-        .unwrap_or_default()
-    } else {
-        DeferredPoolBalanceChange::zero()
-    }
+    parent_chain_value_pools: ValueBalance<NonNegative>,
+) -> Result<DeferredPoolBalanceChange, SubsidyError> {
+    zebra_chain::parameters::subsidy::funding_stream_values(
+        height,
+        network,
+        block_subsidy_with_parent_pools(height, network, parent_chain_value_pools)?,
+    )?
+    .remove(&zebra_chain::parameters::subsidy::FundingStreamReceiver::Deferred)
+    .unwrap_or_default()
+    .checked_sub(network.lockbox_disbursement_total_amount(height))
+    .map(DeferredPoolBalanceChange::new)
+    .ok_or(SubsidyError::Underflow)
 }

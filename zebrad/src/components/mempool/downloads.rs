@@ -27,7 +27,7 @@
 //! [`Mempool::poll_ready`]: super::Mempool::poll_ready
 use std::{
     collections::{HashMap, HashSet},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -47,6 +47,7 @@ use tracing_futures::Instrument;
 
 use zebra_chain::{
     block::Height,
+    parameters::NetworkUpgrade,
     transaction::{self, UnminedTxId, VerifiedUnminedTx},
     transparent,
 };
@@ -139,6 +140,10 @@ pub enum TransactionDownloadVerifyError {
     Invalid {
         error: zebra_consensus::error::TransactionError,
         advertiser_addr: Option<PeerSocketAddr>,
+        /// The transaction's consensus branch upgrade, if its version contains one.
+        transaction_upgrade: Option<NetworkUpgrade>,
+        /// The candidate block height used for mempool consensus verification.
+        verification_height: Height,
     },
 }
 
@@ -149,7 +154,10 @@ pub struct Downloads<ZN, ZV, ZS>
 where
     ZN: Service<zn::Request, Response = zn::Response, Error = BoxError> + Send + Clone + 'static,
     ZN::Future: Send,
-    ZV: Service<tx::Request, Response = tx::Response, Error = BoxError> + Send + Clone + 'static,
+    ZV: Service<tx::MempoolRequest, Response = tx::MempoolResponse, Error = BoxError>
+        + Send
+        + Clone
+        + 'static,
     ZV::Future: Send,
     ZS: Service<zs::Request, Response = zs::Response, Error = BoxError> + Send + Clone + 'static,
     ZS::Future: Send,
@@ -198,19 +206,29 @@ where
         ),
     >,
 
-    /// The number of currently in-flight download tasks per advertising peer.
+    /// The number of currently in-flight download tasks per advertising host,
+    /// keyed on the peer's [`IpAddr`].
     ///
-    /// Invariant: a peer is present here iff some entry in [`Self::cancel_handles`]
-    /// has it as the third tuple element. Enforces
+    /// Keyed on the host IP rather than the full `SocketAddr` so that all
+    /// connections from one host share a single budget: the `source` is a
+    /// transient `(IP, ephemeral port)`, so per-`SocketAddr` keying would give
+    /// each connection its own bucket. This matches the inbound-block download
+    /// cap (`in_flight_ips`). See #10685.
+    ///
+    /// Invariant: an IP is present here with count `n` iff exactly `n` entries in
+    /// [`Self::cancel_handles`] have a source with that IP. Enforces
     /// [`MAX_INBOUND_CONCURRENCY_PER_PEER`]. See `GHSA-4fc2-h7jh-287c`.
-    pending_per_peer: HashMap<SocketAddr, usize>,
+    pending_per_peer: HashMap<IpAddr, usize>,
 }
 
 impl<ZN, ZV, ZS> Stream for Downloads<ZN, ZV, ZS>
 where
     ZN: Service<zn::Request, Response = zn::Response, Error = BoxError> + Send + Clone + 'static,
     ZN::Future: Send,
-    ZV: Service<tx::Request, Response = tx::Response, Error = BoxError> + Send + Clone + 'static,
+    ZV: Service<tx::MempoolRequest, Response = tx::MempoolResponse, Error = BoxError>
+        + Send
+        + Clone
+        + 'static,
     ZV::Future: Send,
     ZS: Service<zs::Request, Response = zs::Response, Error = BoxError> + Send + Clone + 'static,
     ZS::Future: Send,
@@ -254,12 +272,15 @@ where
                     (Ok(Err(Box::new((hash, e)))), Some(hash))
                 }
                 Err((txid, elapsed)) => {
-                    // Remove the cancel handle so the spawned task's queued `Gossip`
-                    // doesn't stay resident in `cancel_handles` after a verification
-                    // timeout. Without this, a peer that gets each transaction to
-                    // hit `RATE_LIMIT_DELAY` can leak ~2 MB per tx until OOM.
-                    this.cancel_handles.remove(&txid);
-                    (Err((txid, elapsed)), None)
+                    // Treat a verification timeout as a terminal completion so the
+                    // shared cleanup below removes the `cancel_handles` entry — the
+                    // GHSA-65jj fix, which drops the resident `Gossip` (~2 MB per tx)
+                    // so it can't leak until OOM — and releases the per-peer queue
+                    // slot. A bare handle removal here left the slot pinned, so a
+                    // peer that timed out `MAX_INBOUND_CONCURRENCY_PER_PEER`
+                    // transactions could no longer queue any from that source.
+                    // See #10684.
+                    (Err((txid, elapsed)), Some(txid))
                 }
             };
 
@@ -286,7 +307,10 @@ impl<ZN, ZV, ZS> Downloads<ZN, ZV, ZS>
 where
     ZN: Service<zn::Request, Response = zn::Response, Error = BoxError> + Send + Clone + 'static,
     ZN::Future: Send,
-    ZV: Service<tx::Request, Response = tx::Response, Error = BoxError> + Send + Clone + 'static,
+    ZV: Service<tx::MempoolRequest, Response = tx::MempoolResponse, Error = BoxError>
+        + Send
+        + Clone
+        + 'static,
     ZV::Future: Send,
     ZS: Service<zs::Request, Response = zs::Response, Error = BoxError> + Send + Clone + 'static,
     ZS::Future: Send,
@@ -354,10 +378,14 @@ where
             return Err(MempoolError::FullQueue);
         }
 
-        // Per-peer cap: a single advertising peer cannot saturate the queue
-        // with attacker-supplied fake txids. See `GHSA-4fc2-h7jh-287c`.
+        // Per-peer cap: a single advertising host (keyed by IP) cannot saturate
+        // the queue with attacker-supplied fake txids. See `GHSA-4fc2-h7jh-287c`.
         if let Some(source) = source {
-            let count = self.pending_per_peer.get(&source).copied().unwrap_or(0);
+            let count = self
+                .pending_per_peer
+                .get(&source.ip())
+                .copied()
+                .unwrap_or(0);
             if count >= MAX_INBOUND_CONCURRENCY_PER_PEER {
                 debug!(
                     ?txid,
@@ -376,6 +404,7 @@ where
         let network = self.network.clone();
         let verifier = self.verifier.clone();
         let mut state = self.state.clone();
+        let pushed_advertiser_addr = source.map(PeerSocketAddr::from);
 
         let gossiped_tx_req = gossiped_tx.clone();
 
@@ -431,21 +460,20 @@ where
                         "mempool.pushed.transactions.total",
                         "version" => format!("{}",tx.transaction.version()),
                     ).increment(1);
-                    (tx, None)
+                    (tx, pushed_advertiser_addr)
                 }
             };
 
             trace!(?txid, "got tx");
 
+            let transaction_upgrade = tx.transaction.network_upgrade();
             let result = verifier
-                .oneshot(tx::Request::Mempool {
+                .oneshot(tx::MempoolRequest {
                     transaction: tx.clone(),
                     height: next_height,
                 })
                 .map_ok(|rsp| {
-                    let tx::Response::Mempool { transaction, spent_mempool_outpoints } = rsp else {
-                        panic!("unexpected non-mempool response to mempool request")
-                    };
+                    let tx::MempoolResponse { transaction, spent_mempool_outpoints } = rsp;
 
                     (transaction, spent_mempool_outpoints, tip_height)
                 })
@@ -454,7 +482,12 @@ where
             // Hide the transaction data to avoid filling the logs
             trace!(?txid, result = ?result.as_ref().map(|_tx| ()), "verified transaction for the mempool");
 
-            result.map_err(|e| TransactionDownloadVerifyError::Invalid { error: e.into(), advertiser_addr } )
+            result.map_err(|error| TransactionDownloadVerifyError::Invalid {
+                error: error.into(),
+                advertiser_addr,
+                transaction_upgrade,
+                verification_height: next_height,
+            })
         }
         .map_ok(|(tx, spent_mempool_outpoints, tip_height)| {
             metrics::counter!(
@@ -528,7 +561,7 @@ where
         if let Some(source) = source {
             // The per-peer cap check above ensures this can't exceed
             // `MAX_INBOUND_CONCURRENCY_PER_PEER`.
-            *self.pending_per_peer.entry(source).or_insert(0) += 1;
+            *self.pending_per_peer.entry(source.ip()).or_insert(0) += 1;
         }
 
         debug!(
@@ -582,13 +615,14 @@ where
         metrics::gauge!("mempool.currently.queued.transactions",).set(self.pending.len() as f64);
     }
 
-    /// Decrement the per-peer pending count for `source`, removing the entry
+    /// Decrement the per-host pending count for `source`'s IP, removing the entry
     /// when it reaches zero.
-    fn release_peer_slot(pending_per_peer: &mut HashMap<SocketAddr, usize>, source: SocketAddr) {
-        if let Some(count) = pending_per_peer.get_mut(&source) {
+    fn release_peer_slot(pending_per_peer: &mut HashMap<IpAddr, usize>, source: SocketAddr) {
+        let ip = source.ip();
+        if let Some(count) = pending_per_peer.get_mut(&ip) {
             *count = count.saturating_sub(1);
             if *count == 0 {
-                pending_per_peer.remove(&source);
+                pending_per_peer.remove(&ip);
             }
         }
     }
@@ -634,7 +668,10 @@ impl<ZN, ZV, ZS> PinnedDrop for Downloads<ZN, ZV, ZS>
 where
     ZN: Service<zn::Request, Response = zn::Response, Error = BoxError> + Send + Clone + 'static,
     ZN::Future: Send,
-    ZV: Service<tx::Request, Response = tx::Response, Error = BoxError> + Send + Clone + 'static,
+    ZV: Service<tx::MempoolRequest, Response = tx::MempoolResponse, Error = BoxError>
+        + Send
+        + Clone
+        + 'static,
     ZV::Future: Send,
     ZS: Service<zs::Request, Response = zs::Response, Error = BoxError> + Send + Clone + 'static,
     ZS::Future: Send,
@@ -645,3 +682,6 @@ where
         metrics::gauge!("mempool.currently.queued.transactions").set(0 as f64);
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,6 +1,7 @@
 //! Cached state configuration for Zebra.
 
 use std::{
+    fmt,
     fs::{self, canonicalize, remove_dir_all, DirEntry, ReadDir},
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -19,6 +20,37 @@ use crate::{
     service::finalized_state::restorable_db_versions,
     state_database_format_version_in_code, BoxError,
 };
+
+/// A wrapper for [`String`] which hides its contents from `Debug` output, so that secrets
+/// are not written to logs by types that derive `Debug`.
+///
+/// Serialization is unaffected, so the value still round-trips through the config file. Use
+/// [`RedactedString::as_str()`] to reach the contents deliberately.
+#[derive(Clone, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct RedactedString(String);
+
+impl fmt::Debug for RedactedString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad("[REDACTED]")
+    }
+}
+
+impl RedactedString {
+    /// Return the wrapped string, which exposes its sensitive contents.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<S> From<S> for RedactedString
+where
+    S: Into<String>,
+{
+    fn from(value: S) -> Self {
+        Self(value.into())
+    }
+}
 
 /// Configuration for the state service.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -137,7 +169,7 @@ pub struct Config {
 
     #[cfg(feature = "elasticsearch")]
     /// The elasticsearch database password.
-    pub elasticsearch_password: String,
+    pub elasticsearch_password: RedactedString,
 }
 
 fn gen_temp_path(prefix: &str) -> PathBuf {
@@ -159,7 +191,7 @@ impl Config {
     ) -> PathBuf {
         let db_kind = db_kind.as_ref();
         let major_version = format!("v{major_version}");
-        let net_dir = network.lowercase_name();
+        let net_dir = network.directory_name();
 
         if self.ephemeral {
             gen_temp_path(&format!("zebra-{db_kind}-{major_version}-{net_dir}-"))
@@ -181,7 +213,7 @@ impl Config {
             return None;
         }
 
-        let net_dir = network.lowercase_name();
+        let net_dir = network.directory_name();
         Some(self.cache_dir.join("non_finalized_state").join(net_dir))
     }
 
@@ -224,7 +256,7 @@ impl Default for Config {
             #[cfg(feature = "elasticsearch")]
             elasticsearch_username: "elastic".to_string(),
             #[cfg(feature = "elasticsearch")]
-            elasticsearch_password: "".to_string(),
+            elasticsearch_password: RedactedString::default(),
         }
     }
 }
@@ -296,7 +328,7 @@ fn delete_old_databases(config: Config, db_kind: String, major_version: u64, net
     // Check and remove the network path.
     assert_eq!(
         db_path.file_name(),
-        Some(network.lowercase_name().as_ref()),
+        Some(network.directory_name().as_ref()),
         "unexpected database network path structure"
     );
     assert!(db_path.pop());
@@ -566,5 +598,29 @@ pub(crate) mod hidden {
         )??;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacted_string_hides_contents_from_debug() {
+        let secret = RedactedString::from("hunter2");
+
+        assert_eq!(format!("{secret:?}"), "[REDACTED]");
+        assert_eq!(secret.as_str(), "hunter2");
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    #[test]
+    fn config_debug_does_not_contain_elasticsearch_password() {
+        let config = Config {
+            elasticsearch_password: RedactedString::from("hunter2"),
+            ..Config::default()
+        };
+
+        assert!(!format!("{config:?}").contains("hunter2"));
     }
 }

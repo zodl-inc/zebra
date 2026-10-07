@@ -17,7 +17,9 @@ docker run -d \
 
 The `-p 8233:8233` flag publishes Zebra's P2P port so other Zcash nodes can
 connect to yours (use `-p 18233:18233` for Testnet), and `-v` mounts a named
-volume so the chain state survives container restarts.
+volume so the chain state survives container restarts. To skip the multi-day
+initial sync, you can seed that volume from a
+[state snapshot](./snapshots.md#docker).
 
 You can also use `docker compose`, which we recommend. First get the repo:
 
@@ -37,13 +39,13 @@ The default compose file already exposes the Mainnet P2P port.
 ## Custom Images
 
 If you want to use your own images with, for example, some opt-in compilation
-features enabled, add the desired features to the `FEATURES` variable in the
-`docker/.env` file and build the image:
+features enabled, pass the desired features to the `FEATURES` build argument
+and build the image:
 
 ```shell
 docker build \
   --file docker/Dockerfile \
-  --env-file docker/.env \
+  --build-arg FEATURES="default-release-binaries elasticsearch" \
   --target runtime \
   --tag zebra:local \
   .
