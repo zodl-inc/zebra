@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [14.0.1] - 2026-10-09
+
+### Security
+
+- Bound the upfront `Vec` reservation in `zcash_deserialize_bytes_external_count` (and therefore `zcash_deserialize_string_external_count`, which delegates to it) so a peer-supplied byte count cannot force a large allocation before any payload byte is read. The buffer now grows incrementally as real bytes arrive, mirroring the element-path cap added in PR #10563. CWE-770 ([#10572](https://github.com/ZcashFoundation/zebra/issues/10572)).
+
 ## [14.0.0] - 2026-10-01
 
 ### Breaking Changes
