@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [Zebra 7.0.0-rc.1](https://github.com/ZcashFoundation/zebra/releases/tag/v7.0.0-rc.1) - 2026-10-09
+
+### Security
+
+- The mempool per-peer inbound-download cap is now keyed on the peer's IP address instead of its full socket address, so a single host can no longer exceed the cap by opening connections from multiple source ports. This matches the inbound-block download cap ([#10685](https://github.com/ZcashFoundation/zebra/issues/10685)).
+
 ## [Zebra 7.0.0-rc.0](https://github.com/ZcashFoundation/zebra/releases/tag/v7.0.0-rc.0) - 2026-10-01
 
 This release candidate supports the NU7 network upgrade on Testnet, which
