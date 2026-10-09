@@ -1,26 +1,225 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and this project adheres to [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [15.0.0] - 2026-10-01
+
+### Breaking Changes
+
+- The state uses database format v29.0.0. Its registered upgrade automatically moves compatible v28 state into `state/v29` when no v29 database exists, without a resync or record migration. Legacy 48-byte value-pool and 52-byte block-info records remain readable with a zero NSM balance; new writes use 56 and 60 bytes. New block-info records append NSM after the existing pool-and-size prefix. Direct database readers must use a v29-compatible `zebra-state` dependency and be upgraded with the writer; v28 readers cannot read the wider records. Retain a v28 backup before upgrading for rollback: disabling `state.delete_old_database` does not preserve the directory that the upgrade moves. Manual directory renames are not a substitute for the supported upgrade. The public `zebra_state::IntoDisk::Bytes` associated type changes from `Vec<u8>` to `[u8; 60]` for `zebra_chain::block_info::BlockInfo`, and from `[u8; 48]` to `[u8; 56]` for `zebra_chain::value_balance::ValueBalance<NonNegative>`. The NSM reserve is seeded once at NU7 activation, persisted with each block, and excluded from issued supply. `GetBlockTemplateChainInfo::chain_value_pools` is now unconditional; update struct literals. Contextual invalid-subsidy errors score the sending peer 100 ([#11454](https://github.com/ZcashFoundation/zebra/pull/11454), [#11530](https://github.com/ZcashFoundation/zebra/pull/11530)).
+- `ContextuallyVerifiedBlock::with_block_and_spent_utxos` now also requires the network and parent chain value pools. It performs accounting, not coinbase payout validation; callers must separately apply the contextual subsidy checks. Deferred-pool calculation propagates subsidy errors through `ValidateContextError::InvalidSubsidy` rather than substituting zero ([#11530](https://github.com/ZcashFoundation/zebra/pull/11530)).
+- `ReadRequest::SolutionRate::num_blocks` is now `Option<usize>`: use `Some` for an explicit window or `None` to select the consensus averaging window after the requested height is clamped to the snapshotted tip ([#11529](https://github.com/ZcashFoundation/zebra/pull/11529)).
+- `Config::{db_path, non_finalized_state_backup_dir}` include configured Testnet wire magic in storage namespaces. Resynchronize existing custom Testnets; Mainnet, public Testnet, and Regtest paths are unchanged. ([#11527](https://github.com/ZcashFoundation/zebra/pull/11527))
+- `ReadRequest` and `ReadResponse`, which are not `#[non_exhaustive]`, gain `SpentOutputs` variants that return the transparent outputs spent by a block's non-coinbase inputs. Consumers that match on them exhaustively must handle the new variants. ([#11472](https://github.com/ZcashFoundation/zebra/pull/11472))
+- Updated `sapling-crypto` to 0.9, whose `Node` appears in `ReadResponse::SaplingSubtrees` ([#11559](https://github.com/ZcashFoundation/zebra/pull/11559)).
+
+### Changed
+
+- From NU7 activation, the state credits the NSM with 60% of aggregate transaction fees, rounded down. From the configured NSM reissuance height, contextual payout validation uses the exact parent reserve and rejects coinbases that claim the withheld fees ([#11487](https://github.com/ZcashFoundation/zebra/pull/11487), [#11530](https://github.com/ZcashFoundation/zebra/pull/11530)).
+- [ZIP 218](https://zips.z.cash/zip-0218) widens the difficulty averaging window from 17 to 102 blocks at NU7 ([#11529](https://github.com/ZcashFoundation/zebra/pull/11529)).
+- `ReadRequest::ChainInfo` bounds timestamps by network-specific median-time rules and the local two-hour future limit, rejecting empty ranges. Testnet minimum-difficulty timestamps follow the candidate upgrade: six target spacings before NU7 and eighteen from NU7, requiring a gap strictly greater than 450 seconds under the approved amendment in [zips#1382](https://github.com/zcash/zips/pull/1382). Templates retain standard difficulty when the threshold exceeds the timestamp representation ([#11529](https://github.com/ZcashFoundation/zebra/pull/11529)).
+
+## [14.0.0] - 2026-09-23
+
+### Breaking Changes
+
+- `zebra-chain`'s `Transaction` type is now a newtype over `zcash_primitives::transaction::Transaction`, and appears in this crate's public API ([#10461](https://github.com/ZcashFoundation/zebra/pull/10461)).
+- Removed the `UpdateWith` implementations for Sprout, Sapling, Orchard and Ironwood shielded data. Nullifier bookkeeping happens directly in `Chain::update_chain_tip_with_block_except_trees` and its revert path, so those implementations were an unused second copy ([#10461](https://github.com/ZcashFoundation/zebra/pull/10461)).
+- `ReadRequest::UtxosByAddresses` is now a struct variant, taking a `height_range` and an optional `max_entries` alongside the addresses. Both bound the index scan, so the work the query does is set by what the caller asks for rather than by the size of the addresses' UTXO sets ([#11239](https://github.com/ZcashFoundation/zebra/issues/11239)).
+- `ReadRequest`, which is not `#[non_exhaustive]`, gains the `AnyChainSaplingTree`, `AnyChainOrchardTree` and `AnyChainIronwoodTree` variants. Consumers that match on `ReadRequest` exhaustively must handle them ([#10820](https://github.com/ZcashFoundation/zebra/pull/10820)).
+- `SemanticallyVerifiedBlock` gains a public `received_time: Option<Instant>` field, the local time the block verifier received the block. Code constructing it literally must set it; use `None` for blocks that did not pass through the block verifier ([#11341](https://github.com/ZcashFoundation/zebra/pull/11341)).
+
+### Added
+
+- `NonFinalizedState` now reports `zcash.pool.value.zatoshis` and `zcash.pool.notes.created` gauges, labeled by pool `name`, for the best chain tip rather than the finalized state ([#11391](https://github.com/ZcashFoundation/zebra/pull/11391)).
+- `ReadRequest::AnyChainSaplingTree`, `ReadRequest::AnyChainOrchardTree` and `ReadRequest::AnyChainIronwoodTree`, which look up a note commitment treestate by block hash in every non-finalized chain before falling back to the finalized state, like `ReadRequest::AnyChainBlock`. They stay correct when a reorg moves the block onto a side chain ([#10820](https://github.com/ZcashFoundation/zebra/pull/10820)).
+- `ValidateContextError::is_auth_commitment_mismatch()`, which reports whether a block was rejected because its authorizing data does not match its header commitment. It is a dedicated predicate rather than a `misbehavior_score()` test, so callers are not coupled to scoring policy. Also `ValidateContextError::AncestorRejected`, which the state now returns for a queued block whose ancestor failed contextual validation, instead of a copy of the ancestor's error, with `ValidateContextError::for_descendant()` to build it, and `is_descendant_of_auth_commitment_mismatch()` on `ValidateContextError` and `CommitBlockError`.
+- The concrete error type `AwaitUtxoError` for handling failed `AwaitUtxo` state requests ([#11205](https://github.com/ZcashFoundation/zebra/pull/11205)).
+- `AwaitUtxoRequest`, which implements `MappedRequest` for `Request::AwaitUtxo` ([#11205](https://github.com/ZcashFoundation/zebra/pull/11205)).
+
+### Changed
+
+- Best-chain selection among non-finalized chains with equal cumulative work now prefers the chain whose tip block was received first, per the Zcash protocol specification ("To break ties between leaf blocks, a node will prefer the block that it received first"), with the tip block hash as the final tie-breaker. The block verifier stamps each block's receipt time, and the non-finalized `Chain` tracks its tip's stamp for the comparison ([#11341](https://github.com/ZcashFoundation/zebra/pull/11341)).
+
+### Fixed
+
+- `NonFinalizedBlocksListener` no longer sends blocks that several non-finalized chains share once per chain. Forks share every block below their fork point, so an initial send could queue up to `MAX_NON_FINALIZED_CHAIN_FORKS` copies of a chain up to `MAX_BLOCK_REORG_HEIGHT` blocks long, overflowing the channel buffer ([#11265](https://github.com/ZcashFoundation/zebra/issues/11265)).
+- The non-finalized transparent `received` total (served by `getaddressbalance`) now saturates instead of overflowing. An address with enough non-finalized self-transfer churn could push its cumulative `received` counter past `u64::MAX`, panicking in debug builds and wrapping in release builds; it now matches the finalized path's saturating accounting ([#10556](https://github.com/ZcashFoundation/zebra/issues/10556)).
+
+### Security
+
+- A peer that serves a block whose authorizing data does not match its header commitment is now scored at the ban threshold. From NU5 onward the block hash and merkle root commit to transaction effects but not to authorizing data (ZIP-244), so a peer could reuse a canonical header with a forged body and keep the block hash unchanged. Such a body is only rejected by the contextual `hashBlockCommitments` check, whose suggested misbehaviour score was hard-coded to 0, so the peer was never scored and could repeat the forgery for free. `InvalidChainHistoryBlockTxAuthCommitment` now scores 100; every other contextual error keeps a score of 0, because it does not prove the serving peer misbehaved. Blocks queued behind a forged body are rejected with a distinct `AncestorRejected` error that scores 0, so the honest peers that served them are not banned along with the forger ([GHSA-3c94-hf7p-g5mf](https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-3c94-hf7p-g5mf)). Thanks to @ouicate for reporting the issue.
+
+## [13.0.0] - 2026-08-10
+
+### Breaking Changes
+
+- Requires `zebra-chain` 12.0.0 and `zebra-node-services` 10.0.0, whose types and service traits
+  appear in this crate's public API.
+
+### Fixed
+
+- `init_read_only()` now returns `StateInitError::ReadOnlyEphemeralConflict` for a config with
+  `ephemeral = true`, even when the configured `cache_dir` is missing or unreadable. Previously the
+  cache directory was checked first, so this configuration error surfaced as
+  `StateInitError::ReadOnlyCacheDirUnreadable`
+  ([#11146](https://github.com/ZcashFoundation/zebra/pull/11146)).
+
+## [12.0.1] - 2026-07-27
+
+### Changed
+
+- `zebra-chain` dependency bumped to `11.3.0`.
+- `zebra-node-services` dependency bumped to `9.1.2`.
+
+## [12.0.0] - 2026-07-24
+
+### Breaking Changes
+
+- `MinedTx` gains a public `best_chain_tip_hash: block::Hash` field, captured
+  from the same chain snapshot used to compute `confirmations`. `MinedTx::new`
+  now takes this hash as its fifth argument. Consumers should pin follow-up
+  state queries to this hash (or to the resolved block hash) instead of issuing
+  a separate `Tip` / `BestChainBlockHash` request. See
+  [#10550](https://github.com/ZcashFoundation/zebra/issues/10550).
+- `Config::elasticsearch_password` is now a `RedactedString` instead of a `String`. Config
+  files are unaffected; code that reads the field needs `.as_str()`, and code that sets it
+  needs `.into()`. Only applies to builds with the `elasticsearch` feature
+  ([#11051](https://github.com/ZcashFoundation/zebra/pull/11051))
+
+### Added
+
+- `RedactedString`, a `String` wrapper whose `Debug` output is `[REDACTED]`, for config fields
+  that hold secrets
+  ([#11051](https://github.com/ZcashFoundation/zebra/pull/11051))
+
+### Security
+
+- The startup config dump no longer prints the Elasticsearch password. It previously appeared
+  in cleartext in logs and journald on `elasticsearch`-feature builds with a password set
+  ([#11051](https://github.com/ZcashFoundation/zebra/pull/11051))
+
+## [11.1.1] - 2026-07-22
+
+### Security
+
+- Known block queries now clear notifications for rejected non-finalized blocks before
+  checking sent hashes, allowing an honest block body with the same header hash to be
+  retried immediately
+  ([GHSA-x93j-mj2f-q338](https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-x93j-mj2f-q338)).
+
+## [11.1.0] - 2026-07-17
+
+### Changed
+
+- On Regtest, `expected_difficulty_threshold` now returns the fixed minimum
+  difficulty (the `powLimit`) with no retargeting, matching zcashd's
+  `fPowNoRetargeting`. Every Regtest block stays at the `powLimit`, so a zcashd
+  sidecar following a Zebra Regtest chain accepts its headers instead of
+  rejecting them as `bad-diffbits`
+  ([#10952](https://github.com/ZcashFoundation/zebra/pull/10952)).
+- Regtest now advances the block time minimally, keeping mined timestamps just
+  above the median-time-past instead of clamping the current time into the valid
+  range. This stops Regtest chain time from racing ~90 minutes per block and
+  outrunning a following zcashd sidecar's acceptable block-time window
+  ([#10952](https://github.com/ZcashFoundation/zebra/pull/10952)).
+
+## [11.0.0] - 2026-07-17
+
+### Changed
+
+- Major version bump for the rocksdb 0.24 upgrade. `rocksdb::Error` is reachable through
+  `ZebraDb`'s public API, so the rocksdb 0.22 → 0.24 bump is a breaking change; 10.1.0
+  shipped it without a major and is yanked. Downstream code pinning an older rocksdb must
+  upgrade.
+- `zebra-chain` dependency bumped to `11.2.0`.
+- `zebra-node-services` dependency bumped to `9.1.1`.
+
+### Security
+
+- Checking the remaining transaction value of a block is no longer quadratic in the number of
+  transactions (GHSA-4g24-549m-hp75).
+- The state service now accepts children of a block that was accepted and has the same
+  block header hash (due to [ZIP-244](https://zips.z.cash/zip-0244)) as a block that
+  was previously rejected
+  ([GHSA-8gxx-hc65-vv82](https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-8gxx-hc65-vv82)).
+
+## [10.1.0] - 2026-07-10
+
+### Added
+
+- `CommitCheckpointVerifiedError` re-exported from the crate root
+- `CommitCheckpointVerifiedError::inner()` and `CommitSemanticallyVerifiedError::inner()`
+  accessors for the underlying `CommitBlockError`
+  ([#10916](https://github.com/ZcashFoundation/zebra/pull/10916))
+
+### Changed
+
+- MSRV is now 1.88
+- Migrated to `rocksdb 0.24`
+
+## [10.0.0] - 2026-07-02
 
 ### Breaking Changes
 
 - The finalized-state open functions now return `Result<_, StateInitError>` instead
   of panicking when a read-only state cannot be opened: `FinalizedState::new`,
-  `FinalizedState::new_with_debug`, `init_read_only`, `spawn_init_read_only`, and the
-  lower-level `ZebraDb::new` / `DiskDb::new`. A read-only open against a missing or
-  unreadable cache directory, or with no existing database on disk, now returns the
-  new public `StateInitError` rather than panicking. The read-write open path is
-  unchanged.
+  `init_read_only`, `spawn_init_read_only`, and the lower-level `ZebraDb::new`.
+  A read-only open against a missing or
+  unreadable cache directory, with no existing database on disk, or with an ephemeral
+  database also configured (a read-only secondary must not delete the primary's
+  files), now returns the new public `StateInitError` rather than panicking. The
+  read-write open path is unchanged.
   ([#10741](https://github.com/ZcashFoundation/zebra/pull/10741))
 - `ReadRequest::NonFinalizedBlocksListener` is now a struct variant carrying the
   caller's `known_chain_tips`, so the non-finalized blocks listener streams only the
-  blocks above the chain tips the caller already has. `MAX_NON_FINALIZED_CHAIN_FORKS`
-  is now re-exported from the crate root.
+  blocks above the chain tips the caller already has. `NonFinalizedBlocksListener::spawn`
+  takes the same `known_chain_tips` set and no longer takes a `Network`.
+  `MAX_NON_FINALIZED_CHAIN_FORKS` is now re-exported from the crate root.
+- Added `ReadRequest::FindForkPoint { known_blocks }` request and the corresponding
+  `ReadResponse::ForkPoint(Option<(block::Height, block::Hash)>)` response. The
+  server returns the most recent block in the caller-supplied locator that is
+  on the best chain (the fork point) to assist in reorg handling for clients
+  that track only a single chain tip at a time.
+  ([#10764](https://github.com/ZcashFoundation/zebra/pull/10764)).
+
+### Added
+
+- `request::Spend::Ironwood`
+- `impl From<ironwood::Nullifier> for Spend`
+- `ReadRequest::IronwoodTree` and `ReadRequest::IronwoodSubtrees { start_index, limit }`, with
+  the corresponding `ReadResponse::{IronwoodTree, IronwoodSubtrees}` responses.
+- `ValidateContextError::{DuplicateIronwoodNullifier, UnknownIronwoodAnchor}`
+- `DiskWriteBatch::{create_ironwood_tree, insert_ironwood_subtree}`
+- `ZebraDb`:
+  - `contains_ironwood_anchor`
+  - `contains_ironwood_nullifier`
+  - `ironwood_revealing_tx_loc`
+  - `ironwood_subtree_list_by_index_range`
+  - `ironwood_tree_by_hash_or_height`
+  - `ironwood_tree_by_height`
+  - `ironwood_tree_by_height_range`
+  - `ironwood_tree_for_tip`
+- `impl IntoDisk for ironwood::Nullifier`
+- `impl DuplicateNullifierError for ironwood::Nullifier`
+
+### Changed
+
+- Bumped the on-disk database format version (27 → 28) for the Ironwood note
+  commitment tree, anchors, subtrees, and nullifier set.
+- `IntoDisk for ValueBalance<NonNegative>` now serializes to `[u8; 48]`
+  (was `[u8; 40]`), for the added Ironwood pool balance.
+
+### Fixed
+
+- Read-only secondary databases no longer attempt to flush on shutdown, which RocksDB
+  rejects and which was logged as an unexpected error
+  ([#10784](https://github.com/ZcashFoundation/zebra/pull/10784))
+- Finalizing a block no longer re-inserts an emptied side chain into the chain set
+  ([#10818](https://github.com/ZcashFoundation/zebra/pull/10818))
 
 ## [9.0.1] - 2026-06-18
 

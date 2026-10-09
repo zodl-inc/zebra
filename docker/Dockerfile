@@ -25,18 +25,24 @@ ARG CARGO_HOME="${HOME}/.cargo"
 ARG CARGO_TARGET_DIR="${HOME}/target"
 
 # This stage prepares Zebra's build deps and captures build args as env vars.
-FROM rust:${RUST_VERSION}-trixie AS deps
+# rust:1.91.0-trixie
+FROM rust:${RUST_VERSION}-trixie@sha256:a0dba1c1b2c90585fc44421b55ddf8063323760dc644ba1d35f5b389ad3e8e14 AS deps
 SHELL ["/bin/bash", "-xo", "pipefail", "-c"]
 
 # Make the build platform available as a variable
 ARG BUILDPLATFORM
 
+# Forwarded from the caller workflow so rustc, dpkg, and other tools honour it.
+# A non-empty default is required: an empty value makes clang and usermod error.
+ARG SOURCE_DATE_EPOCH=0
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+
 # Install zebra build deps
 RUN apt-get -qq update && \
     apt-get -qq install -y --no-install-recommends \
-    libclang-dev=1:19.0-63 \
-    protobuf-compiler=3.21.12-11 \
-    && rm -rf /var/lib/apt/lists/* /tmp/*
+    libclang-dev=1:19.0-* \
+    protobuf-compiler=3.21.12-* \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/log/* /var/cache/ldconfig/aux-cache
 
 # Build arguments and variables
 ARG CARGO_INCREMENTAL
@@ -86,7 +92,7 @@ ARG CARGO_TARGET_DIR
 
 # Download and install cargo-nextest, curl and librocksdb-dev.
 RUN apt-get -qq update && \
-    apt-get -qq install -y --no-install-recommends librocksdb-dev=9.10.0-1+b1 curl=8.14.1-2+deb13u3 && \
+    apt-get -qq install -y --no-install-recommends librocksdb-dev=9.10.0-* curl=8.14.1-* && \
     mkdir -p "${CARGO_HOME}/bin" && \
     case ${BUILDPLATFORM:-linux/$(uname -m)} in \
         "linux/amd64"|"linux/x86_64") ARCH="linux" ;; \
@@ -96,7 +102,7 @@ RUN apt-get -qq update && \
     curl -LsSf "https://get.nexte.st/latest/${ARCH}" | tar zxf - -C "${CARGO_HOME}/bin" && \
     apt-get -qq remove --purge -y curl && \
     apt-get -qq autoremove -y && \
-    rm -rf /var/lib/apt/lists/* /tmp/*
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/log/* /var/cache/ldconfig/aux-cache
 
 # Link RocksDB dynamically for faster test builds.
 ENV ROCKSDB_LIB_DIR="/usr/lib/"
@@ -118,8 +124,13 @@ RUN [ -n "${SHORT_SHA}" ] && export SHORT_SHA="${SHORT_SHA}" || true; \
     chown -R ${UID}:${GID} ${CARGO_HOME} && \
     chown -R ${UID}:${GID} ${CARGO_TARGET_DIR}
 
-# Copy the lightwalletd binary and source files to be able to run tests
-COPY --link --from=electriccoinco/lightwalletd:v0.4.17 /usr/local/bin/lightwalletd /usr/local/bin/
+# Copy the lightwalletd binary and source files to be able to run tests.
+#
+# This must be a lightwalletd release that can parse the transaction versions in
+# the blocks the tests sync: v6 transactions (version group ID 0xD884B698) were
+# introduced by NU6.3, so anything older than v0.5.0 stalls at the NU6.3
+# activation height and the lightwalletd tests time out.
+COPY --link --from=electriccoinco/lightwalletd:v0.5.3 /usr/local/bin/lightwalletd /usr/local/bin/
 
 COPY --link --chown=${UID}:${GID} ./docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
@@ -143,6 +154,19 @@ WORKDIR ${HOME}
 ARG CARGO_HOME
 ARG CARGO_TARGET_DIR
 
+# Strip absolute build paths from the binary so it doesn't depend on the build layout.
+ENV RUSTFLAGS="--remap-path-prefix=${HOME}=/zebra --remap-path-prefix=${CARGO_HOME}=/cargo"
+
+# The target cache mount is shared by every build on the builder, from any
+# branch. Cargo treats a workspace crate as fresh when its sources are older than
+# its cached artifacts, and a checkout is often older than a build that another
+# branch ran in the meantime, so this build could link, or entirely reuse, crates
+# compiled from someone else's sources. So the workspace crates are always
+# rebuilt here and only third-party dependencies, which cargo keys by version,
+# come from the cache. `sharing=locked` keeps another build from writing to the
+# target directory between the clean, the build and the copy. That only holds
+# against builds that also lock it, so the cache has its own `id` instead of
+# sharing one with builds that still use the shared mount of older Dockerfiles.
 RUN --mount=type=bind,source=tower-batch-control,target=tower-batch-control \
     --mount=type=bind,source=tower-fallback,target=tower-fallback \
     --mount=type=bind,source=zebra-chain,target=zebra-chain \
@@ -157,18 +181,28 @@ RUN --mount=type=bind,source=tower-batch-control,target=tower-batch-control \
     --mount=type=bind,source=zebrad,target=zebrad \
     --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
-    --mount=type=cache,target=${CARGO_TARGET_DIR} \
+    --mount=type=cache,id=zebra-release-target,target=${CARGO_TARGET_DIR},sharing=locked \
     --mount=type=cache,target=${CARGO_HOME} \
     [ -n "${SHORT_SHA}" ] && export SHORT_SHA="${SHORT_SHA}" || true; \
+    # Keep this list in sync with the workspace crates bind-mounted above.
+    cargo clean --release \
+        --package tower-batch-control --package tower-fallback --package zebra-chain \
+        --package zebra-consensus --package zebra-network --package zebra-node-services \
+        --package zebra-rpc --package zebra-script --package zebra-state \
+        --package zebra-test --package zebra-utils --package zebrad && \
     cargo build --locked --release --features "${FEATURES}" --package zebrad --bin zebrad && \
     cp ${CARGO_TARGET_DIR}/release/zebrad /usr/local/bin
 
 # This stage starts from scratch using Debian and copies the built zebrad binary
 # from the `release` stage along with other binaries and files.
-FROM debian:trixie-slim AS runtime
+# debian:trixie-slim
+FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2 AS runtime
 
 ARG FEATURES
 ENV FEATURES=${FEATURES}
+
+ARG SOURCE_DATE_EPOCH=0
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
 # Create a non-privileged user for running `zebrad`.
 #
@@ -196,9 +230,9 @@ ENV HOME=${HOME}
 # Install curl for healtchecks and adduser for user/group creation
 RUN apt-get -q update && \
     apt-get -q install -y --no-install-recommends \
-    adduser=3.152 \
-    curl=8.14.1-2+deb13u3 \
-    && rm -rf /var/lib/apt/lists/* /tmp/*
+    adduser=3.152* \
+    curl=8.14.1-* \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/log/* /var/cache/ldconfig/aux-cache
 
 RUN addgroup --quiet --gid ${GID} ${USER} && \
     adduser --quiet --gid ${GID} --uid ${UID} --home ${HOME} ${USER} --disabled-password --gecos ""
@@ -227,3 +261,32 @@ CMD ["zebrad"]
 # - with mining enabled using S-nomp and `nheqminer`.
 #
 # We can add further functionality to this stage for further purposes.
+
+# zcashd-compat runtime image: the runtime image plus the hash-pinned zcashd
+# wallet sidecar (and its RPC client) from the ZcashFoundation/zcashd
+# `zebra-compat` release, for the supervised sidecar configuration
+# (`zebrad start --zcashd-compat` with `manage_zcashd = true`).
+#
+# The sidecar release only ships x86_64 Linux binaries, so this stage is
+# amd64-only (CI already builds non-`runtime` targets for amd64 only).
+# Override the ARGs to bake in a different sidecar release.
+FROM runtime AS runtime-zcashd-compat
+
+ARG ZCASHD_COMPAT_ARCHIVE_URL="https://github.com/ZcashFoundation/zcashd/releases/download/zebra-compat-v1.2.0/zcashd-zebra-compat-v1.2.0-linux-x86_64.tar.gz"
+ARG ZCASHD_COMPAT_ARCHIVE_SHA256="a2d1d9a7cd4c766ea73990fcd17f370bc94eee738e50f1a3b97262db32f2bab7"
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# ca-certificates is needed for the HTTPS download: curl is installed above
+# with --no-install-recommends, which skips it.
+RUN apt-get -q update && \
+    apt-get -q install -y --no-install-recommends \
+    ca-certificates=20250419 \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/log/* /var/cache/ldconfig/aux-cache \
+    && curl -fsSL "${ZCASHD_COMPAT_ARCHIVE_URL}" -o /tmp/zcashd.tar.gz \
+    && echo "${ZCASHD_COMPAT_ARCHIVE_SHA256}  /tmp/zcashd.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/zcashd.tar.gz -C /tmp ./bin/zcashd ./bin/zcash-cli \
+    && install -m 0755 /tmp/bin/zcashd /tmp/bin/zcash-cli /usr/local/bin/ \
+    && rm -rf /tmp/zcashd.tar.gz /tmp/bin \
+    && /usr/local/bin/zcashd --version \
+    && /usr/local/bin/zcash-cli --version

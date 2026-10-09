@@ -254,6 +254,18 @@ impl ZebraDb {
         self.orchard_tree_by_height(&height)
     }
 
+    /// Returns the Ironwood [`note commitment tree`](orchard::tree::NoteCommitmentTree) specified by
+    /// a hash or height, if it exists in the finalized state.
+    #[allow(clippy::unwrap_in_result)]
+    pub fn ironwood_tree_by_hash_or_height(
+        &self,
+        hash_or_height: HashOrHeight,
+    ) -> Option<Arc<orchard::tree::NoteCommitmentTree>> {
+        let height = hash_or_height.height_or_else(|hash| self.height(hash))?;
+
+        self.ironwood_tree_by_height(&height)
+    }
+
     // Read tip block methods
 
     /// Returns the hash of the current finalized tip block.
@@ -376,6 +388,7 @@ impl ZebraDb {
             Spend::Sprout(nullifier) => self.sprout_revealing_tx_loc(nullifier)?,
             Spend::Sapling(nullifier) => self.sapling_revealing_tx_loc(nullifier)?,
             Spend::Orchard(nullifier) => self.orchard_revealing_tx_loc(nullifier)?,
+            Spend::Ironwood(nullifier) => self.ironwood_revealing_tx_loc(nullifier)?,
         };
 
         self.transaction_hash(tx_loc)
@@ -465,7 +478,7 @@ impl ZebraDb {
                 .block
                 .transactions
                 .iter()
-                .flat_map(|tx| tx.inputs().iter())
+                .flat_map(|tx| tx.inputs().into_iter())
                 .flat_map(|input| input.outpoint())
                 .map(|outpoint| {
                     (
@@ -654,9 +667,8 @@ impl DiskWriteBatch {
         //
         // https://zips.z.cash/protocol/protocol.pdf#txnconsensus
         //
-        // So we ignore the genesis UTXO, transparent address index, and value pool updates
-        // for the genesis block. This also ignores genesis shielded value pool updates, but there
-        // aren't any of those on mainnet or testnet.
+        // Ignore genesis UTXOs and the transparent address index. The shared block value-pool
+        // calculation also excludes these unspendable outputs; shielded updates are retained.
         if !finalized.height.is_min() {
             // Commit transaction indexes
             self.prepare_transparent_transaction_batch(

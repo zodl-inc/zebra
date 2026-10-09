@@ -2,18 +2,19 @@
 
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use color_eyre::Report;
 
 use zebra_chain::{
     block::Height,
-    chain_tip::ChainTip,
-    parameters::{Network, NetworkUpgrade},
+    chain_tip::{ChainTip, NetworkChainTipHeightEstimator},
+    parameters::Network,
 };
 
 use crate::application::release_version;
 
 /// The estimated height that this release will be published.
-pub const ESTIMATED_RELEASE_HEIGHT: u32 = 3_382_189;
+pub const ESTIMATED_RELEASE_HEIGHT: u32 = 3_444_000;
 
 /// The maximum number of days after `ESTIMATED_RELEASE_HEIGHT` where a Zebra server will run
 /// without halting.
@@ -22,8 +23,8 @@ pub const ESTIMATED_RELEASE_HEIGHT: u32 = 3_382_189;
 ///
 /// - Zebra will exit with a panic if the current tip height is bigger than the
 ///   `ESTIMATED_RELEASE_HEIGHT` plus this number of days.
-/// - Reduced to 37 days for the NU7 network upgrade expected at end of July 2026.
-pub const EOS_PANIC_AFTER: u32 = 37;
+/// - Currently set to 12 weeks.
+pub const EOS_PANIC_AFTER: u32 = 84;
 
 /// The number of days before the end of support where Zebra will display warnings.
 pub const EOS_WARN_AFTER: u32 = EOS_PANIC_AFTER - 14;
@@ -61,22 +62,31 @@ pub async fn start(
     }
 }
 
+/// Returns the estimated last supported height for this release, or `None` on networks where
+/// end of support is not enforced.
+///
+/// The node runs up to and including this height, and halts with an end of support panic when
+/// the tip goes past it. This matches zcashd, where `end_of_service.block_height` is also the
+/// threshold rather than the first halted block.
+pub fn end_of_support_height(network: &Network) -> Option<Height> {
+    (network == &Network::Mainnet).then(|| estimated_height_after_release(network, EOS_PANIC_AFTER))
+}
+
+/// Returns the estimated height `days` after [`ESTIMATED_RELEASE_HEIGHT`] on `network`,
+/// following the target block spacing in force at each height.
+pub fn estimated_height_after_release(network: &Network, days: u32) -> Height {
+    // Only the elapsed time matters, so any reference time works.
+    let release_time = DateTime::<Utc>::UNIX_EPOCH;
+    NetworkChainTipHeightEstimator::new(release_time, Height(ESTIMATED_RELEASE_HEIGHT), network)
+        .estimate_height_at(release_time + chrono::Duration::days(days.into()))
+}
+
 /// Check if the current release is too old and panic if so.
 pub fn check(tip_height: Height, network: &Network) {
     info!("Checking if Zebra release is inside support range ...");
 
-    // Get the current block spacing
-    let target_block_spacing = NetworkUpgrade::target_spacing_for_height(network, tip_height);
-
-    // Get the number of blocks per day
-    let estimated_blocks_per_day =
-        u32::try_from(chrono::Duration::days(1).num_seconds() / target_block_spacing.num_seconds())
-            .expect("number is always small enough to fit");
-
-    let panic_height =
-        Height(ESTIMATED_RELEASE_HEIGHT + (EOS_PANIC_AFTER * estimated_blocks_per_day));
-    let warn_height =
-        Height(ESTIMATED_RELEASE_HEIGHT + (EOS_WARN_AFTER * estimated_blocks_per_day));
+    let panic_height = estimated_height_after_release(network, EOS_PANIC_AFTER);
+    let warn_height = estimated_height_after_release(network, EOS_WARN_AFTER);
 
     if tip_height > panic_height {
         panic!(

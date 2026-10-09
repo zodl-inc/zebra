@@ -15,6 +15,8 @@ exclude = [
     "^https?://example\\.com",
     # Rate-limited or auth-required
     "^https://crates\\.io/crates/",
+    # Arti GitLab rejects automated link checks
+    "^https://gitlab\\.torproject\\.org/tpo/core/arti/-/blob/main/CONTRIBUTING\\.md",
     # GitHub pages requiring authentication
     "^https://github.com/.*/settings",
     "^https://github.com/organizations/.*/settings",
@@ -23,8 +25,6 @@ exclude = [
     # Template placeholder URLs (0000)
     "^https://github.com/.*/issues/0000",
     "^https://github.com/.*/pull/0000",
-    # Mergify dashboard (requires auth)
-    "^https://dashboard.mergify.com/",
     # IACR eprint server returns 403 to automated link checkers
     "^https://eprint\\.iacr\\.org/",
 
@@ -41,12 +41,13 @@ exclude_path = [
     "book/mermaid.min.js",
     "zebra-rpc/qa/rpc-tests",
     "supply-chain",
-    # CHANGELOG contains historical references to deprecated URLs
+    # Changelogs and their changie sources contain historical references to deprecated URLs
     "CHANGELOG.md",
+    ".changes",
 ]
 
 # Accept these HTTP status codes as valid
-accept = ["200", "204", "206", "301", "302", "307", "308", "429"]
+accept = ["200", "202", "204", "206", "301", "302", "307", "308", "403", "429"]
 
 # Timeout for requests (seconds)
 timeout = 30

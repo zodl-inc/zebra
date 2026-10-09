@@ -1,0 +1,71 @@
+[workspace]
+# Prevent Cargo.lock churn from triggering cascading Release PRs.
+# The `home` crate pin (0.5.11) would break if cargo update runs.
+dependencies_update = false
+
+# Do not ask release-plz to execute a release on ordinary pushes. Zebra owns all
+# post-merge execution in the release workflow.
+release_always = false
+
+# release-plz only creates and updates Release PRs. After merge,
+# ZcashFoundation/cargo-release reconciles crates, tags, and the public
+# `zebrad` GitHub Release in .github/workflows/release.yml.
+git_release_enable = false
+
+# Changie owns every changelog. The release workflow batches source-authored
+# fragments after release-plz has selected the versions.
+changelog_update = false
+
+# Breaking-change detection runs per PR via ziff, not in the release-pr job.
+semver_check = false
+
+# These commits trigger version bumps. Other commits can still cascade through
+# dependency bumps, but do not trigger a release by themselves.
+release_commits = "^(feat|fix|perf|refactor|build)"
+
+# Release PR metadata. Keep the generated long-lived PR out of the urgent queue
+# until maintainers are ready to publish.
+pr_labels = ["release"]
+pr_name = "chore: release{% if package and version %} v{{ version }}{% endif %}"
+
+pr_body = """
+## Release summary
+
+{% for release in releases %}
+- `{{ release.package }}`: {% if release.previous_version and release.previous_version != release.next_version %}{{ release.previous_version }} → {% endif %}{{ release.next_version }}
+{%- endfor %}
+
+---
+This PR was generated with [release-plz](https://github.com/release-plz/release-plz/).
+"""
+
+# Repository URL.
+repo_url = "https://github.com/ZcashFoundation/zebra"
+
+[changelog]
+# Keep source-authored entries authoritative. The exact pinned release-plz
+# version represents dependency-only releases as commits with this sentinel ID.
+body = """
+{% if package == "zebrad" %}
+## [Zebra {{ version }}](https://github.com/ZcashFoundation/zebra/releases/tag/v{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}
+## [{{ version }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% endif %}
+{% for commit in commits %}
+{% if commit.id == "0000000" %}
+### Changed
+
+- {{ commit.message | upper_first }}
+{% endif %}
+{% endfor %}
+"""
+# Normalize template whitespace before prepending source-authored entries.
+postprocessors = [
+  { pattern = '\n{3,}', replace = "\n\n" },
+  { pattern = '\n{2,}$', replace = "\n" },
+]
+
+[[package]]
+name = "zebrad"
+changelog_path = "CHANGELOG.md"
+git_tag_name = "v{{ version }}"

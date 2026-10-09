@@ -389,8 +389,12 @@ impl WriteBlockWorkerTask {
             // At this point, we know that all the block's descendants
             // are invalid, because we checked all the consensus rules before
             // committing the failing ancestor block to the non-finalized state.
+            //
+            // The children are served by other peers, which often queue them before
+            // the parent arrives, so they get a distinct error that doesn't carry the
+            // parent's misbehaviour score.
             let result = if let Some(parent_error) = parent_error {
-                Err(parent_error.clone())
+                Err(parent_error.for_descendant(parent_hash))
             } else {
                 tracing::trace!(?child_hash, "validating queued child");
                 validate_and_commit_non_finalized(
@@ -431,6 +435,10 @@ impl WriteBlockWorkerTask {
                 // Skip the things we only need to do for successfully committed blocks
                 continue;
             }
+
+            // A successfully committed block supersedes any contextual error
+            // recorded for a different block body with the same header hash.
+            parent_error_map.shift_remove(&child_hash);
 
             // Committing blocks to the finalized state keeps the same chain,
             // so we can update the chain seen by the rest of the application now.

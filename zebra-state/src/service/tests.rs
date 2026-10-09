@@ -341,7 +341,7 @@ proptest! {
     /// Test the `Block.check_transaction_network_upgrade()` error inside the legacy check.
     #[test]
     fn at_least_one_transaction_with_inconsistent_network_upgrade(
-        (network, nu_activation_height, chain) in partial_nu5_chain_strategy(5, false, OVER_LEGACY_CHAIN_LIMIT, NetworkUpgrade::Canopy)
+        (network, nu_activation_height, chain) in partial_nu5_chain_strategy(5, false, OVER_LEGACY_CHAIN_LIMIT, NetworkUpgrade::Nu5)
     ) {
         // this test requires that an invalid block is encountered
         // before a valid block (and before the check gives up),
@@ -382,7 +382,7 @@ proptest! {
     /// Test there is at least one transaction with a valid `network_upgrade` in the legacy check.
     #[test]
     fn at_least_one_transaction_with_valid_network_upgrade(
-        (network, nu_activation_height, chain) in partial_nu5_chain_strategy(5, true, UNDER_LEGACY_CHAIN_LIMIT, NetworkUpgrade::Canopy)
+        (network, nu_activation_height, chain) in partial_nu5_chain_strategy(5, true, UNDER_LEGACY_CHAIN_LIMIT, NetworkUpgrade::Nu5)
     ) {
         let response = crate::service::check::legacy_chain(nu_activation_height, chain.into_iter().rev(), &network, TEST_LEGACY_CHAIN_LIMIT)
             .map_err(|error| error.to_string());
@@ -425,7 +425,7 @@ proptest! {
             // which is not included in the UTXO set
             if block.height > block::Height(0) {
                 let utxos = &block.new_outputs.iter().map(|(k, ordered_utxo)| (*k, ordered_utxo.utxo.clone())).collect();
-                let block_value_pool = &block.block.chain_value_pool_change(utxos, DeferredPoolBalanceChange::zero())?;
+                let block_value_pool = &block.block.chain_value_pool_change(utxos, DeferredPoolBalanceChange::zero(), &network, expected_finalized_value_pool.clone()?.constrain()?)?;
                 expected_finalized_value_pool += *block_value_pool;
             }
 
@@ -452,7 +452,7 @@ proptest! {
         let mut expected_non_finalized_value_pool = Ok(expected_finalized_value_pool?);
         for block in non_finalized_blocks {
             let utxos = block.new_outputs.clone();
-            let block_value_pool = &block.block.chain_value_pool_change(&transparent::utxos_from_ordered_utxos(utxos), DeferredPoolBalanceChange::zero())?;
+            let block_value_pool = &block.block.chain_value_pool_change(&transparent::utxos_from_ordered_utxos(utxos), DeferredPoolBalanceChange::zero(), &network, expected_non_finalized_value_pool.clone()?.constrain()?)?;
             expected_non_finalized_value_pool += *block_value_pool;
 
             let result_receiver = state_service.queue_and_commit_to_non_finalized_state(block.clone());
@@ -655,6 +655,34 @@ fn read_only_open_with_unreadable_cache_dir_returns_error() {
         Err(other) => panic!("expected ReadOnlyCacheDirUnreadable, got: {other:?}"),
         Ok(_) => {
             panic!("expected an error when opening a read-only state with an unreadable cache dir")
+        }
+    }
+}
+
+/// Opening a read-only state with an ephemeral database configured must fail with
+/// [`StateInitError::ReadOnlyEphemeralConflict`]: a read-only secondary follows another
+/// process's primary database and must never delete it, so it cannot also be ephemeral
+/// (which would delete the primary's files on drop).
+#[test]
+fn read_only_open_with_ephemeral_config_returns_error() {
+    let network = Network::Mainnet;
+
+    // While `ephemeral: true` should make `cache_dir` irrelevant, we had
+    // instances where a bug would try to read the `cache_dir` before checking
+    // `ephemeral`, so we use a missing directory to ensure that `ephemeral` is
+    // checked first.
+    let parent = tempfile::tempdir().expect("creating a temporary directory should succeed");
+    let config = Config {
+        ephemeral: true,
+        cache_dir: parent.path().join("missing"),
+        ..Config::default()
+    };
+
+    match super::init_read_only(config, &network) {
+        Err(crate::StateInitError::ReadOnlyEphemeralConflict) => {}
+        Err(other) => panic!("expected ReadOnlyEphemeralConflict, got: {other:?}"),
+        Ok(_) => {
+            panic!("expected an error when opening a read-only state with an ephemeral config")
         }
     }
 }

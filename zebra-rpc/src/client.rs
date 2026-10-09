@@ -30,19 +30,19 @@ pub use crate::methods::{
         submit_block::{SubmitBlockErrorResponse, SubmitBlockResponse},
         subsidy::{BlockSubsidy, FundingStream, GetBlockSubsidyResponse},
         transaction::{
-            Input, JoinSplit, Orchard, OrchardAction, OrchardFlags, Output, ScriptPubKey,
+            Input, JoinSplit, Orchard, OrchardAction, OrchardFlags, Output, Prevout, ScriptPubKey,
             ScriptSig, ShieldedOutput, ShieldedSpend, TransactionObject, TransactionTemplate,
         },
         unified_address::ZListUnifiedReceiversResponse,
         validate_address::ValidateAddressResponse,
         z_validate_address::{ZValidateAddressResponse, ZValidateAddressType},
     },
-    AddressStrings, BlockHeaderObject, BlockObject, GetAddressBalanceRequest,
+    AddressStrings, BlockHeaderObject, BlockObject, EndOfService, GetAddressBalanceRequest,
     GetAddressBalanceResponse, GetAddressTxIdsRequest, GetAddressUtxosResponse,
     GetAddressUtxosResponseObject, GetBlockHashResponse, GetBlockHeaderResponse,
     GetBlockHeightAndHashResponse, GetBlockResponse, GetBlockTransaction, GetBlockTrees,
-    GetBlockchainInfoResponse, GetInfoResponse, GetRawTransactionResponse, Hash,
-    SendRawTransactionResponse, Utxo,
+    GetBlockchainInfoResponse, GetDeprecationInfoResponse, GetInfoResponse,
+    GetRawTransactionResponse, Hash, SendRawTransactionResponse, Utxo,
 };
 
 /// Constants needed by clients of Zebra's RPC server

@@ -22,10 +22,12 @@ use std::{
     collections::HashSet,
     future::Future,
     iter,
+    ops::Bound,
     pin::{pin, Pin},
     task::{Context, Poll},
 };
 
+use chrono::Duration;
 use futures::{future::FutureExt, stream::Stream};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tower::{buffer::Buffer, timeout::Timeout, util::BoxService, Service};
@@ -34,6 +36,7 @@ use zebra_chain::{
     block::{self, Height},
     chain_sync_status::ChainSyncStatus,
     chain_tip::ChainTip,
+    parameters::{Network, NetworkUpgrade},
     transaction::UnminedTxId,
 };
 use zebra_consensus::{error::TransactionError, transaction};
@@ -80,10 +83,59 @@ use downloads::{
 type Outbound = Buffer<BoxService<zn::Request, zn::Response, zn::BoxError>, zn::Request>;
 type State = Buffer<BoxService<zs::Request, zs::Response, zs::BoxError>, zs::Request>;
 type TxVerifier = Buffer<
-    BoxService<transaction::Request, transaction::Response, TransactionError>,
-    transaction::Request,
+    BoxService<transaction::MempoolRequest, transaction::MempoolResponse, TransactionError>,
+    transaction::MempoolRequest,
 >;
 type InboundTxDownloads = TxDownloads<Timeout<Outbound>, Timeout<TxVerifier>, State>;
+
+/// The wall-clock window around a network upgrade activation where an adjacent upgrade's branch ID
+/// receives no peer score: 40 blocks at 75 seconds, 120 blocks at ZIP 218's 25 seconds.
+const BRANCH_ID_GRACE_PERIOD: Duration = Duration::minutes(50);
+
+/// Returns the mempool peer score after applying branch ID activation policy.
+fn adjusted_mempool_misbehavior_score(
+    error: &TransactionError,
+    transaction_upgrade: Option<NetworkUpgrade>,
+    verification_height: Height,
+    network: &Network,
+) -> u32 {
+    let is_grace_mismatch = matches!(error, TransactionError::WrongConsensusBranchId)
+        && transaction_upgrade.is_some_and(|transaction_upgrade| {
+            is_in_branch_id_grace_period(transaction_upgrade, verification_height, network)
+        });
+
+    if is_grace_mismatch {
+        0
+    } else {
+        error.mempool_misbehavior_score()
+    }
+}
+
+/// Returns `true` if `transaction_upgrade` activates immediately before or after the upgrade
+/// current at `height` on `network`, and `height` is within the grace window of that boundary.
+fn is_in_branch_id_grace_period(
+    transaction_upgrade: NetworkUpgrade,
+    height: Height,
+    network: &Network,
+) -> bool {
+    let activations = network.activation_list();
+    let Some((&current_height, &current)) = activations.range(..=height).next_back() else {
+        return false;
+    };
+    let grace_blocks =
+        BRANCH_ID_GRACE_PERIOD.num_seconds() / current.target_spacing().num_seconds();
+
+    let previous = activations.range(..current_height).next_back();
+    let next = activations
+        .range((Bound::Excluded(height), Bound::Unbounded))
+        .next();
+
+    previous.is_some_and(|(_, &previous)| {
+        previous == transaction_upgrade && height - current_height < grace_blocks
+    }) || next.is_some_and(|(&next_height, &next)| {
+        next == transaction_upgrade && next_height - height <= grace_blocks
+    })
+}
 
 /// The state of the mempool.
 ///
@@ -207,6 +259,9 @@ impl ActiveState {
 /// of that have yet to be confirmed by the Zcash network. A transaction is
 /// confirmed when it has been included in a block ('mined').
 pub struct Mempool {
+    /// The configured Zcash network.
+    network: Network,
+
     /// The configurable options for the mempool, persisted between states.
     config: Config,
 
@@ -271,6 +326,7 @@ pub struct Mempool {
 impl Mempool {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        network: &Network,
         config: &Config,
         outbound: Outbound,
         state: State,
@@ -285,6 +341,7 @@ impl Mempool {
         let transaction_subscriber = MempoolTxSubscriber::new(transaction_sender.clone());
 
         let mut service = Mempool {
+            network: network.clone(),
             config: config.clone(),
             active_state: ActiveState::Disabled,
             sync_status,
@@ -308,7 +365,8 @@ impl Mempool {
 
         // Make sure `is_enabled` is accurate.
         // Otherwise, it is only updated in `poll_ready`, right before each service call.
-        service.update_state(None);
+        let is_caught_up_to_start = service.is_caught_up_to_start();
+        service.update_state(None, is_caught_up_to_start);
 
         (service, transaction_subscriber)
     }
@@ -341,48 +399,70 @@ impl Mempool {
         is_debug_enabled
     }
 
-    /// Update the mempool state (enabled / disabled) depending on how close to
-    /// the tip is the synchronization, including side effects to state changes.
+    /// Returns `true` if Zebra is caught up enough to start the mempool.
+    fn is_caught_up_to_start(&self) -> bool {
+        self.sync_status.is_close_to_tip() || self.is_enabled_by_debug()
+    }
+
+    /// Replaces the active state with a freshly-initialised [`ActiveState::Enabled`],
+    /// using `tip_action`'s best tip hash as the `last_seen_tip_hash`.
+    fn enable_at_tip(&mut self, tip_action: &TipAction) {
+        let (last_seen_tip_hash, _) = tip_action.best_tip_hash_and_height();
+
+        let tx_downloads = Box::pin(TxDownloads::new(
+            Timeout::new(self.outbound.clone(), TRANSACTION_DOWNLOAD_TIMEOUT),
+            Timeout::new(self.tx_verifier.clone(), TRANSACTION_VERIFY_TIMEOUT),
+            self.state.clone(),
+        ));
+        self.active_state = ActiveState::Enabled {
+            storage: storage::Storage::new(&self.config),
+            tx_downloads,
+            last_seen_tip_hash,
+        };
+    }
+
+    /// Activate the mempool once Zebra is close enough to the tip.
     ///
-    /// Accepts an optional [`TipAction`] for setting the `last_seen_tip_hash` field
-    /// when enabling the mempool state, it will not enable the mempool if this is None.
+    /// Sync status only gates initial activation. Once the mempool is active,
+    /// this method does not disable it.
+    ///
+    /// Accepts an optional [`TipAction`] for setting the `last_seen_tip_hash`
+    /// field when enabling the mempool state. It will not enable the mempool if
+    /// this is [`None`]. `is_caught_up_to_start` is supplied by the caller, which
+    /// already computes it, to avoid evaluating the sync-status predicate twice.
     ///
     /// Returns `true` if the state changed.
-    fn update_state(&mut self, tip_action: Option<&TipAction>) -> bool {
-        let is_close_to_tip = self.sync_status.is_close_to_tip() || self.is_enabled_by_debug();
-
-        match (is_close_to_tip, self.is_enabled(), tip_action) {
+    fn update_state(
+        &mut self,
+        tip_action: Option<&TipAction>,
+        is_caught_up_to_start: bool,
+    ) -> bool {
+        // TODO: revisit these state transitions when sync status can prove
+        // whether Zebra is behind the network tip.
+        match (is_caught_up_to_start, self.is_enabled(), tip_action) {
             // the active state is up to date, or there is no tip action to activate the mempool
             (false, false, _) | (true, true, _) | (true, false, None) => return false,
 
             // Enable state - there should be a chain tip when Zebra is close to the network tip
             (true, false, Some(tip_action)) => {
-                let (last_seen_tip_hash, tip_height) = tip_action.best_tip_hash_and_height();
-
-                info!(?tip_height, "activating mempool: Zebra is close to the tip");
-
-                let tx_downloads = Box::pin(TxDownloads::new(
-                    Timeout::new(self.outbound.clone(), TRANSACTION_DOWNLOAD_TIMEOUT),
-                    Timeout::new(self.tx_verifier.clone(), TRANSACTION_VERIFY_TIMEOUT),
-                    self.state.clone(),
-                ));
-                self.active_state = ActiveState::Enabled {
-                    storage: storage::Storage::new(&self.config),
-                    tx_downloads,
-                    last_seen_tip_hash,
-                };
-            }
-
-            // Disable state
-            (false, true, _) => {
                 info!(
-                    tip_height = ?self.latest_chain_tip.best_tip_height(),
-                    "deactivating mempool: Zebra is syncing lots of blocks"
+                    tip_height = ?tip_action.best_tip_height(),
+                    "activating mempool: Zebra is close to the tip"
                 );
 
-                // This drops the previous ActiveState::Enabled, cancelling its download tasks.
-                // We don't preserve the previous transactions, because we are syncing lots of blocks.
-                self.active_state = ActiveState::Disabled;
+                self.enable_at_tip(tip_action);
+            }
+
+            // TODO: only disable an already-active mempool when validated sync
+            // state proves Zebra is behind a higher-work chain that follows
+            // this node's consensus rules.
+            //
+            // The sync status can be triggered by lower-work forks,
+            // stale peers, or peers on incompatible consensus rules, so
+            // it is strong enough to delay initial activation but not to shut
+            // down a working mempool.
+            (false, true, _) => {
+                return false;
             }
         };
 
@@ -526,10 +606,14 @@ impl Service<Request> for Mempool {
         Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let tip_action = self.chain_tip_change.last_tip_change();
+        let is_caught_up_to_start = self.is_caught_up_to_start();
+        let should_check_tip = self.is_enabled() || is_caught_up_to_start;
+        let tip_action = should_check_tip
+            .then(|| self.chain_tip_change.last_tip_change())
+            .flatten();
 
         // TODO: Consider broadcasting a `MempoolChange` when the mempool is disabled.
-        let is_state_changed = self.update_state(tip_action.as_ref());
+        let is_state_changed = self.update_state(tip_action.as_ref(), is_caught_up_to_start);
 
         tracing::trace!(is_enabled = ?self.is_enabled(), ?is_state_changed, "started polling the mempool...");
 
@@ -545,9 +629,16 @@ impl Service<Request> for Mempool {
         //
         // But if the mempool was just freshly enabled,
         // skip resetting and removing mined transactions for this tip.
-        if !is_state_changed && matches!(tip_action, Some(TipAction::Reset { .. })) {
+        let reset_tip_action = match tip_action.as_ref() {
+            Some(reset_tip_action @ TipAction::Reset { .. }) if !is_state_changed => {
+                Some(reset_tip_action)
+            }
+            _ => None,
+        };
+
+        if let Some(reset_tip_action) = reset_tip_action {
             info!(
-                tip_height = ?tip_action.as_ref().unwrap().best_tip_height(),
+                tip_height = ?reset_tip_action.best_tip_height(),
                 "resetting mempool: switched best chain, skipped blocks, or activated network upgrade"
             );
 
@@ -563,7 +654,13 @@ impl Service<Request> for Mempool {
             std::mem::drop(previous_state);
 
             // Re-initialise an empty state.
-            self.update_state(tip_action.as_ref());
+            //
+            // This deliberately bypasses the initial-activation gate in `update_state()`:
+            // the mempool was already active when the reset arrived, and a
+            // far-from-tip sync status must not disable an already-active mempool
+            // (it can be triggered by lower-work forks, stale peers, or peers on
+            // incompatible consensus rules).
+            self.enable_at_tip(reset_tip_action);
 
             // Re-verify the transactions that were pending or valid at the previous tip.
             // This saves us the time and data needed to re-download them.
@@ -646,13 +743,19 @@ impl Service<Request> for Mempool {
                         if let TransactionDownloadVerifyError::Invalid {
                             error,
                             advertiser_addr: Some(advertiser_addr),
+                            transaction_upgrade,
+                            verification_height,
                         } = &error
                         {
-                            if error.mempool_misbehavior_score() != 0 {
-                                let _ = self.misbehavior_sender.try_send((
-                                    *advertiser_addr,
-                                    error.mempool_misbehavior_score(),
-                                ));
+                            let score = adjusted_mempool_misbehavior_score(
+                                error,
+                                *transaction_upgrade,
+                                *verification_height,
+                                &self.network,
+                            );
+
+                            if score != 0 {
+                                let _ = self.misbehavior_sender.try_send((*advertiser_addr, score));
                             }
                         };
 
@@ -725,8 +828,16 @@ impl Service<Request> for Mempool {
                     "sending new transactions to peers and RPC listeners"
                 );
 
-                self.transaction_sender
-                    .send(MempoolChange::added(send_to_peers_ids))?;
+                // A send fails only when the broadcast channel has no
+                // subscribers, which is a normal state the mempool must
+                // tolerate: the gossip and indexer tasks are downstream
+                // consumers of this feed, and mempool liveness must not depend
+                // on them staying subscribed. Discard the result so a momentary
+                // absence of subscribers does not make `poll_ready()` return a
+                // service-fatal error. See #10689.
+                let _ = self
+                    .transaction_sender
+                    .send(MempoolChange::added(send_to_peers_ids));
             }
 
             // Send transactions that were rejected to RPC listeners.
@@ -736,8 +847,11 @@ impl Service<Request> for Mempool {
                     "sending invalidated transactions to RPC listeners"
                 );
 
-                self.transaction_sender
-                    .send(MempoolChange::invalidated(invalidated_ids))?;
+                // See the `MempoolChange::added` send above: a missing
+                // subscriber is not a fatal condition. See #10689.
+                let _ = self
+                    .transaction_sender
+                    .send(MempoolChange::invalidated(invalidated_ids));
             }
 
             // Send transactions that were mined onto the best chain to RPC listeners.
@@ -747,8 +861,11 @@ impl Service<Request> for Mempool {
                     "sending mined transactions to RPC listeners"
                 );
 
-                self.transaction_sender
-                    .send(MempoolChange::mined(mined_mempool_ids))?;
+                // See the `MempoolChange::added` send above: a missing
+                // subscriber is not a fatal condition. See #10689.
+                let _ = self
+                    .transaction_sender
+                    .send(MempoolChange::mined(mined_mempool_ids));
             }
         }
 
@@ -893,17 +1010,18 @@ impl Service<Request> for Mempool {
                     async move { Ok(Response::Queued(rsp)) }.boxed()
                 }
 
-                // Queue inv-advertised candidates from a specific peer.
-                // Per-peer accounting is enforced inside the downloader.
-                Request::QueueFromPeer { txids, source } => {
-                    trace!(req_count = ?txids.len(), ?source, "got mempool QueueFromPeer request");
+                // Queue candidates received from a specific peer (advertised IDs
+                // or a directly pushed transaction). Per-peer accounting is
+                // enforced inside the downloader.
+                Request::QueueFromPeer { candidates, source } => {
+                    trace!(req_count = ?candidates.len(), ?source, "got mempool QueueFromPeer request");
 
-                    for txid in txids {
-                        if storage.should_download_or_verify(txid).is_err() {
+                    for candidate in candidates {
+                        if storage.should_download_or_verify(candidate.id()).is_err() {
                             continue;
                         }
                         let _ = tx_downloads.download_if_needed_and_verify(
-                            Gossip::Id(txid),
+                            candidate,
                             Some(source),
                             None,
                         );
