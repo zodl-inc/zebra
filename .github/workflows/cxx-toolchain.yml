@@ -1,0 +1,74 @@
+# Builds Zebra's vendored C++ crates (zebra-script, librocksdb-sys) against
+# multiple C++ toolchains (GCC 13/14/15 and clang) to catch compiler-specific
+# build breakage early.
+name: C++ toolchain build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Ensures that only one workflow task will run at a time. Previous builds, if
+# already in process, will get cancelled. Only the latest commit will be allowed
+# to run, cancelling any workflows in between
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  cxx-build:
+    name: build (${{ matrix.name }})
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    container: ${{ matrix.container }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # gcc:N images ship g++ already; the clang leg installs clang from
+          # apt on a plain Debian base (extra: clang).
+          - { name: gcc-13, container: "gcc:13@sha256:b9471b5da62a3cdfa3f415e85baa78e0bb4a8ec3fd1aeac3aa0eefda318911c8", cc: gcc, cxx: g++, extra: "" }
+          - { name: gcc-14, container: "gcc:14@sha256:06e8ae332eba8e22eba929a61025e68ff62a92fd84bfb97f2be7db6a068b77cf", cc: gcc, cxx: g++, extra: "" }
+          - { name: gcc-15, container: "gcc:15@sha256:51d7d6d622bd8b4a56abef019d3ab7e9d81ceaae8bb04802e53dea81706d4e55", cc: gcc, cxx: g++, extra: "" }
+          - { name: clang, container: "debian:trixie-slim@sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8", cc: clang, cxx: clang++, extra: "clang" }
+    env:
+      # The cc crate honours CC/CXX when compiling the vendored C++ crates.
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+        with:
+          persist-credentials: false
+
+      # The base images lack sudo (used by setup-zebra-build), libclang-dev
+      # (used by bindgen for the RocksDB bindings), and curl/ca-certificates
+      # (used to fetch rustup). matrix.extra adds the clang compiler on the
+      # clang leg.
+      - name: Install container prerequisites
+        run: |
+          apt-get -qq update
+          apt-get -qq install -y --no-install-recommends \
+            sudo libclang-dev curl ca-certificates ${{ matrix.extra }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 #v1.16.1
+        with:
+          toolchain: stable
+          cache-key: cxx-toolchain-${{ matrix.name }}
+          cache-on-failure: true
+
+      - uses: ./.github/actions/setup-zebra-build
+
+      - name: Confirm compiler version
+        run: ${{ matrix.cxx }} --version
+
+      - name: Build vendored C++ crates
+        run: cargo build -p zebra-script
